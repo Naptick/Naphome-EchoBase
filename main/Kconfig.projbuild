@@ -1,0 +1,52 @@
+menu "Korvo1 LED Audio Test"
+
+config LED_AUDIO_STRIP_GPIO
+    int "WS2812 data GPIO"
+    default 19
+    help
+        GPIO that feeds the built-in Korvo WS2812 ring. GPIO19 is routed to the
+        factory LED chain on Korvo-1 production boards.
+
+config LED_AUDIO_LED_COUNT
+    int "Number of pixels"
+    default 12
+    range 1 64
+    help
+        Total number of addressable LEDs on the Korvo-1 ring.
+
+config LED_AUDIO_BRIGHTNESS
+    int "Brightness (0-255)"
+    default 64
+    range 1 255
+    help
+        Global brightness scalar applied to every RGB value before writing it to the strip.
+
+config AUDIO_SAMPLE_RATE
+    int "Audio sample rate (Hz)"
+    default 44100
+    range 8000 48000
+    help
+        Sample rate for audio playback.
+
+config LOG_SWEEP_DURATION_SEC
+    int "Log sweep duration (seconds)"
+    default 5
+    range 1 30
+    help
+        Duration of the logarithmic frequency sweep test tone.
+
+config LOG_SWEEP_START_FREQ
+    int "Log sweep start frequency (Hz)"
+    default 20
+    range 20 20000
+    help
+        Starting frequency for the logarithmic sweep.
+
+config LOG_SWEEP_END_FREQ
+    int "Log sweep end frequency (Hz)"
+    default 20000
+    range 20 20000
+    help
+        Ending frequency for the logarithmic sweep.
+
+endmenu
