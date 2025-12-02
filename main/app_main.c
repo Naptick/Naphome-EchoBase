@@ -18,17 +18,17 @@ static const char *TAG = "korvo1_led_audio";
 static led_strip_handle_t s_strip = NULL;
 
 // Audio player configuration for korvo1
-// Based on ES8388 codec on korvo1 board
-// I2S pins: BCLK=GPIO4, LRCLK=GPIO5, DATA=GPIO18, MCLK=GPIO0
-// I2C pins: SCL=GPIO1, SDA=GPIO2
+// Based on ES8311 codec on korvo1 board
+// I2S pins per BSP: BCLK=GPIO40, LRCLK=GPIO41, DATA=GPIO39, MCLK=GPIO42
+// I2C pins per BSP: SCL=GPIO2, SDA=GPIO1
 static const audio_player_config_t s_audio_config = {
-    .i2s_port = I2S_NUM_1,
-    .bclk_gpio = GPIO_NUM_4,
-    .lrclk_gpio = GPIO_NUM_5,
-    .data_gpio = GPIO_NUM_18,
-    .mclk_gpio = GPIO_NUM_0,
-    .i2c_scl_gpio = GPIO_NUM_1,
-    .i2c_sda_gpio = GPIO_NUM_2,
+    .i2s_port = I2S_NUM_0,  // Korvo1 uses I2S0 for speaker
+    .bclk_gpio = GPIO_NUM_40,  // BSP_I2S0_SCLK
+    .lrclk_gpio = GPIO_NUM_41,  // BSP_I2S0_LCLK
+    .data_gpio = GPIO_NUM_39,   // BSP_I2S0_DOUT
+    .mclk_gpio = GPIO_NUM_42,   // BSP_I2S0_MCLK
+    .i2c_scl_gpio = GPIO_NUM_2,  // BSP_I2C_SCL
+    .i2c_sda_gpio = GPIO_NUM_1,  // BSP_I2C_SDA
     .default_sample_rate = CONFIG_AUDIO_SAMPLE_RATE,
 };
 
@@ -121,7 +121,21 @@ static void update_leds_for_audio(float progress, bool playing)
     }
     
     // Set all LEDs to the same color (or create a sweep effect)
-    uint32_t active_leds = (uint32_t)(progress * CONFIG_LED_AUDIO_LED_COUNT);
+    // Calculate active LEDs - use ceil to ensure proper rounding up
+    // When progress is very close to 1.0, ensure all LEDs light up
+    uint32_t active_leds;
+    if (progress >= 1.0f) {
+        active_leds = CONFIG_LED_AUDIO_LED_COUNT;
+    } else {
+        active_leds = (uint32_t)ceilf(progress * CONFIG_LED_AUDIO_LED_COUNT);
+        if (active_leds > CONFIG_LED_AUDIO_LED_COUNT) {
+            active_leds = CONFIG_LED_AUDIO_LED_COUNT;
+        }
+    }
+    // Ensure at least one LED is active if progress > 0
+    if (progress > 0.0f && active_leds == 0) {
+        active_leds = 1;
+    }
     for (uint32_t i = 0; i < CONFIG_LED_AUDIO_LED_COUNT; i++) {
         if (i < active_leds) {
             set_pixel_rgb(i, r, g, b);

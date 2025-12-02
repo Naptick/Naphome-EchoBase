@@ -5,7 +5,7 @@ ESP32-S3 firmware for Korvo1 development board featuring LED control and audio p
 ## Features
 
 - **LED Control**: WS2812 RGB LED ring control with configurable brightness and animations
-- **Audio Playback**: ES8388 codec support for high-quality audio output
+- **Audio Playback**: ES8311 codec support for high-quality audio output
 - **Log Sweep Generator**: Generates logarithmic frequency sweeps (chirp signals) for audio testing
 - **MP3 Support**: Optional MP3 file playback using Helix MP3 decoder
 
@@ -13,7 +13,7 @@ ESP32-S3 firmware for Korvo1 development board featuring LED control and audio p
 
 - **Board**: ESP32-S3 based Korvo1 development board
 - **LEDs**: WS2812 RGB LED ring (12 LEDs, GPIO 19)
-- **Audio Codec**: ES8388 (I2S + I2C)
+- **Audio Codec**: ES8311 (I2S + I2C)
   - I2S: BCLK=GPIO4, LRCLK=GPIO5, DATA=GPIO18, MCLK=GPIO0
   - I2C: SCL=GPIO1, SDA=GPIO2
 
@@ -23,7 +23,7 @@ ESP32-S3 firmware for Korvo1 development board featuring LED control and audio p
 Naphome-Korvo1/
 ├── main/                    # Main application code
 │   ├── app_main.c          # Main entry point
-│   ├── audio_player.c      # ES8388 audio codec driver
+│   ├── audio_player.c      # ES8311 audio codec driver
 │   ├── audio_player.h
 │   └── CMakeLists.txt
 ├── components/             # ESP-IDF components
@@ -108,7 +108,7 @@ All configuration is done through `menuconfig` or by editing `sdkconfig.defaults
 ### Audio Configuration
 
 - **Sample Rate**: 44100 Hz (configurable)
-- **Codec**: ES8388
+- **Codec**: ES8311
 - **Format**: 16-bit PCM, stereo
 
 ### Log Sweep Parameters
@@ -137,7 +137,7 @@ LED animations are controlled in `update_leds_for_audio()`. You can modify this 
 ### Audio Not Playing
 
 - Check I2S and I2C pin connections
-- Verify ES8388 codec is properly initialized
+- Verify ES8311 codec is properly initialized
 - Check serial monitor for error messages
 
 ### LEDs Not Working
