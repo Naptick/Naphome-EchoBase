@@ -13,3 +13,14 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=n
 CONFIG_PARTITION_TABLE_SINGLE_APP=n
+
+# Gemini API Configuration (from sample/voice assistant)
+CONFIG_GEMINI_API_KEY="AIzaSyCjrdIBkpGWGXa4u9UileFFIMBZ_ZnMZ1w"
+CONFIG_GEMINI_MODEL="gemini-2.5-flash"
+
+# WiFi Configuration
+CONFIG_WIFI_SSID="The Chateau"
+CONFIG_WIFI_PASSWORD="thechateau"
+
+# Note: ESP32-S3 has embedded PSRAM (8MB) which is automatically available
+# No special configuration needed - malloc() will use it automatically

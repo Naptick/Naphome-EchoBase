@@ -4,6 +4,9 @@
 #include <string.h>
 
 #include "audio_player.h"
+#include "wake_word_manager.h"
+#include "voice_assistant.h"
+#include "wifi_manager.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -331,6 +334,84 @@ void app_main(void)
         ESP_LOGI(TAG, "Audio player initialized");
     }
     
+    // Initialize WiFi (required for Gemini API)
+    wifi_manager_init();
+    
+    // Configure WiFi from menuconfig
+    #ifdef CONFIG_WIFI_SSID
+    if (strlen(CONFIG_WIFI_SSID) > 0) {
+        wifi_manager_config_t wifi_cfg = {
+            .ssid = CONFIG_WIFI_SSID,
+            .password = CONFIG_WIFI_PASSWORD
+        };
+        ESP_LOGI(TAG, "Connecting to WiFi: %s", CONFIG_WIFI_SSID);
+        esp_err_t wifi_err = wifi_manager_connect(&wifi_cfg);
+        if (wifi_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to connect to WiFi: %s", esp_err_to_name(wifi_err));
+            ESP_LOGE(TAG, "Voice assistant requires WiFi connection");
+        } else {
+            char ip_str[16];
+            if (wifi_manager_get_ip(ip_str, sizeof(ip_str)) == ESP_OK) {
+                ESP_LOGI(TAG, "WiFi connected, IP: %s", ip_str);
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "WiFi SSID not configured - set CONFIG_WIFI_SSID in menuconfig");
+        ESP_LOGW(TAG, "WiFi is required for Gemini API - voice assistant will not work without it");
+    }
+    #endif
+    
+    // Initialize voice assistant (Gemini STT-LLM-TTS)
+    #ifdef CONFIG_GEMINI_API_KEY
+    if (strlen(CONFIG_GEMINI_API_KEY) > 0) {
+        voice_assistant_config_t va_config = {
+            .gemini_api_key = CONFIG_GEMINI_API_KEY,
+            .gemini_model = CONFIG_GEMINI_MODEL
+        };
+        
+        ESP_LOGI(TAG, "Initializing Gemini voice assistant (model: %s)...", CONFIG_GEMINI_MODEL);
+        esp_err_t va_err = voice_assistant_init(&va_config);
+        if (va_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize voice assistant: %s", esp_err_to_name(va_err));
+        } else {
+            ESP_LOGI(TAG, "✅ Voice assistant initialized (model: %s)", CONFIG_GEMINI_MODEL);
+            va_err = voice_assistant_start();
+            if (va_err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to start voice assistant: %s", esp_err_to_name(va_err));
+            } else {
+                ESP_LOGI(TAG, "✅ Voice assistant started - ready for wake word commands");
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "⚠️  Gemini API key not configured - voice assistant disabled");
+        ESP_LOGW(TAG, "Set CONFIG_GEMINI_API_KEY in menuconfig or sdkconfig.defaults");
+    }
+    #else
+    ESP_LOGW(TAG, "⚠️  Gemini API key configuration not available - rebuild with menuconfig");
+    #endif
+    
+    // Initialize wake word detection
+    // NOTE: PDM mode only works on I2S0, but I2S0 is used for speaker output
+    // Wake word detection is temporarily disabled until we can resolve the I2S port conflict
+    // TODO: Investigate sharing I2S0 or using alternative microphone input method
+    ESP_LOGW(TAG, "Wake word detection temporarily disabled - I2S PDM requires I2S0 (used by speaker)");
+    /*
+    esp_err_t wake_err = wake_word_manager_init();
+    if (wake_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize wake word manager: %s", esp_err_to_name(wake_err));
+        ESP_LOGW(TAG, "Wake word detection will not be available");
+    } else {
+        ESP_LOGI(TAG, "Wake word manager initialized");
+        // Start wake word detection
+        wake_err = wake_word_manager_start();
+        if (wake_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to start wake word detection: %s", esp_err_to_name(wake_err));
+        } else {
+            ESP_LOGI(TAG, "Wake word detection active - listening for wake words");
+        }
+    }
+    */
+    
     // Startup animation: brief rainbow sweep
     ESP_LOGI(TAG, "Starting LED animation...");
     for (int i = 0; i < 360; i += 5) {
@@ -365,24 +446,43 @@ void app_main(void)
     ESP_ERROR_CHECK(led_strip_clear(s_strip));
     vTaskDelay(pdMS_TO_TICKS(500));
     
-    // Main loop: play log sweep repeatedly
-    while (true) {
-        ESP_LOGI(TAG, "=== Playing log sweep test tone ===");
-        
-        if (audio_err == ESP_OK) {
-            play_log_sweep_pcm();
-        } else {
-            ESP_LOGW(TAG, "Skipping audio (audio player not initialized)");
-            // Just animate LEDs
-            for (int i = 0; i < 100; i++) {
-                float progress = (float)i / 100.0f;
-                update_leds_for_audio(progress, true);
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-            update_leds_for_audio(0.0f, false);
+    // Play log sweep once as startup indicator
+    ESP_LOGI(TAG, "=== Playing log sweep test tone ===");
+
+    if (audio_err == ESP_OK) {
+        play_log_sweep_pcm();
+    } else {
+        ESP_LOGW(TAG, "Skipping audio (audio player not initialized)");
+        // Just animate LEDs
+        for (int i = 0; i < 100; i++) {
+            float progress = (float)i / 100.0f;
+            update_leds_for_audio(progress, true);
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
+        update_leds_for_audio(0.0f, false);
+    }
+    
+    ESP_LOGI(TAG, "=== Sweep playback complete - entering voice assistant mode ===");
+    
+    // Test TTS with welcome message
+    #ifdef CONFIG_GEMINI_API_KEY
+    if (strlen(CONFIG_GEMINI_API_KEY) > 0 && voice_assistant_is_active()) {
+        ESP_LOGI(TAG, "Testing TTS with welcome message...");
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Wait a bit after sweeps
         
-        ESP_LOGI(TAG, "Waiting 2 seconds before next playback...");
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_err_t tts_err = voice_assistant_test_tts("Just say Hey, Nap to talk to me.");
+        if (tts_err == ESP_OK) {
+            ESP_LOGI(TAG, "✅ TTS test successful - welcome message should be playing");
+        } else {
+            ESP_LOGE(TAG, "❌ TTS test failed: %s", esp_err_to_name(tts_err));
+        }
+    }
+    #endif
+    
+    // Main loop: voice assistant mode
+    while (true) {
+        // Voice assistant is running in background
+        // Wake word detection will trigger voice commands
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

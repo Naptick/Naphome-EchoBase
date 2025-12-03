@@ -1,4 +1,5 @@
 #include "audio_player.h"
+#include "audio_eq.h"
 
 #include <inttypes.h>
 #include <string.h>
@@ -53,6 +54,8 @@ typedef struct {
     int current_sample_rate;
     i2c_master_bus_handle_t i2c_bus;
     i2c_master_dev_handle_t i2c_dev;
+    audio_eq_t eq_left;   // EQ for left channel
+    audio_eq_t eq_right;  // EQ for right channel
 } audio_player_state_t;
 
 static audio_player_state_t s_audio;
@@ -483,6 +486,11 @@ esp_err_t audio_player_init(const audio_player_config_t *cfg)
     ESP_RETURN_ON_ERROR(configure_i2s(cfg), TAG, "i2s setup");
     ESP_RETURN_ON_ERROR(es8311_init(), TAG, "codec init");
 
+    // Initialize EQ for both channels (enabled by default)
+    // EQ will be re-initialized with actual sample rate when playback starts
+    audio_eq_init(&s_audio.eq_left, s_audio.current_sample_rate, true);
+    audio_eq_init(&s_audio.eq_right, s_audio.current_sample_rate, true);
+
     s_audio.initialized = true;
     ESP_LOGI(TAG, "Audio player ready (sr=%d)", s_audio.current_sample_rate);
     return ESP_OK;
@@ -715,6 +723,12 @@ esp_err_t audio_player_play_wav(const uint8_t *wav_data, size_t wav_len, audio_p
     ESP_RETURN_ON_ERROR(ensure_sample_rate(fmt.sample_rate), TAG, "sr");
     ESP_LOGI(TAG, "I2S sample rate configured to %" PRIu32 " Hz", fmt.sample_rate);
     
+    // Initialize/reset EQ with actual sample rate
+    audio_eq_init(&s_audio.eq_left, fmt.sample_rate, true);
+    audio_eq_init(&s_audio.eq_right, fmt.sample_rate, true);
+    audio_eq_reset(&s_audio.eq_left);
+    audio_eq_reset(&s_audio.eq_right);
+    
     if (is_float) {
         // Convert 32-bit float to 16-bit PCM
         // Calculate frame count: data_size bytes / (bytes_per_sample * channels)
@@ -769,30 +783,75 @@ esp_err_t audio_player_play_wav(const uint8_t *wav_data, size_t wav_len, audio_p
             // If this fails, the embedded binary might not be accessible
             memcpy(float_buffer, src, float_bytes_this_chunk);
             
-            // Convert float to int16
+            // Process through EQ, then convert float to int16
             // Add headroom (90%) to prevent clipping and distortion
             static bool first_chunk_logged = false;
             float max_amp_this_chunk = 0.0f;
             const float headroom = 0.90f;  // 90% of full scale for headroom
             const float pcm_scale = 32767.0f * headroom;  // ~29490 for headroom
             
-            for (size_t i = 0; i < frames_this_chunk * fmt.num_channels; i++) {
-                float sample_f = float_buffer[i];
-                float abs_sample = sample_f < 0.0f ? -sample_f : sample_f;
-                if (abs_sample > max_amp_this_chunk) {
-                    max_amp_this_chunk = abs_sample;
-                }
-                // Clamp to [-1.0, 1.0] range
-                if (sample_f > 1.0f) sample_f = 1.0f;
-                if (sample_f < -1.0f) sample_f = -1.0f;
-                // Apply headroom to prevent clipping
-                pcm_buffer[i] = (int16_t)(sample_f * pcm_scale);
+            // Process samples through EQ chain
+            for (size_t i = 0; i < frames_this_chunk; i++) {
+                float sample_f;
+                float abs_sample;
                 
-                // Log first few samples for verification
-                if (!first_chunk_logged && i < 8) {
-                    ESP_LOGI(TAG, "First samples [%zu]: float=%.6f, PCM=%d", 
-                             i, sample_f, pcm_buffer[i]);
-                    if (i == 7) first_chunk_logged = true;
+                if (fmt.num_channels == 2) {
+                    // Stereo: process left and right channels separately
+                    float left = float_buffer[i * 2];
+                    float right = float_buffer[i * 2 + 1];
+                    
+                    // Process through EQ
+                    left = audio_eq_process(&s_audio.eq_left, 0, left);
+                    right = audio_eq_process(&s_audio.eq_right, 1, right);
+                    
+                    // Clamp to [-1.0, 1.0] range
+                    if (left > 1.0f) left = 1.0f;
+                    if (left < -1.0f) left = -1.0f;
+                    if (right > 1.0f) right = 1.0f;
+                    if (right < -1.0f) right = -1.0f;
+                    
+                    // Track max amplitude
+                    abs_sample = left < 0.0f ? -left : left;
+                    if (abs_sample > max_amp_this_chunk) max_amp_this_chunk = abs_sample;
+                    abs_sample = right < 0.0f ? -right : right;
+                    if (abs_sample > max_amp_this_chunk) max_amp_this_chunk = abs_sample;
+                    
+                    // Convert to PCM
+                    pcm_buffer[i * 2] = (int16_t)(left * pcm_scale);
+                    pcm_buffer[i * 2 + 1] = (int16_t)(right * pcm_scale);
+                    
+                    // Log first few samples for verification
+                    if (!first_chunk_logged && i < 4) {
+                        ESP_LOGI(TAG, "First samples [%zu]: L=%.6f->%d, R=%.6f->%d", 
+                                 i, float_buffer[i * 2], pcm_buffer[i * 2],
+                                 float_buffer[i * 2 + 1], pcm_buffer[i * 2 + 1]);
+                        if (i == 3) first_chunk_logged = true;
+                    }
+                } else {
+                    // Mono: process single channel
+                    sample_f = float_buffer[i];
+                    
+                    // Process through EQ (use left channel EQ for mono)
+                    sample_f = audio_eq_process(&s_audio.eq_left, 0, sample_f);
+                    
+                    abs_sample = sample_f < 0.0f ? -sample_f : sample_f;
+                    if (abs_sample > max_amp_this_chunk) {
+                        max_amp_this_chunk = abs_sample;
+                    }
+                    
+                    // Clamp to [-1.0, 1.0] range
+                    if (sample_f > 1.0f) sample_f = 1.0f;
+                    if (sample_f < -1.0f) sample_f = -1.0f;
+                    
+                    // Convert to PCM
+                    pcm_buffer[i] = (int16_t)(sample_f * pcm_scale);
+                    
+                    // Log first few samples for verification
+                    if (!first_chunk_logged && i < 8) {
+                        ESP_LOGI(TAG, "First samples [%zu]: float=%.6f, PCM=%d", 
+                                 i, sample_f, pcm_buffer[i]);
+                        if (i == 7) first_chunk_logged = true;
+                    }
                 }
             }
             

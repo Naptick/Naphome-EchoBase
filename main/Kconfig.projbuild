@@ -49,4 +49,32 @@ config LOG_SWEEP_END_FREQ
     help
         Ending frequency for the logarithmic sweep.
 
+    menu "Voice Assistant Configuration"
+        config GEMINI_API_KEY
+            string "Google Gemini API Key"
+            default ""
+            help
+                Google Gemini API key for STT, LLM, and TTS functionality.
+                Get your API key from: https://console.cloud.google.com/
+                Enable APIs: Speech-to-Text, Generative Language (Gemini), Text-to-Speech
+
+        config GEMINI_MODEL
+            string "Gemini Model"
+            default "gemini-2.5-flash"
+            help
+                Gemini model to use: "gemini-2.5-flash" (recommended), "gemini-2.5-pro", or "gemini-2.0-flash"
+
+        config WIFI_SSID
+            string "WiFi SSID"
+            default ""
+            help
+                WiFi network SSID for internet connectivity (required for Gemini API)
+
+        config WIFI_PASSWORD
+            string "WiFi Password"
+            default ""
+            help
+                WiFi network password
+    endmenu
+
 endmenu

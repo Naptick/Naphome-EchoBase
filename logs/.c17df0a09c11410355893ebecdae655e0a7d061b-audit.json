@@ -1,0 +1,20 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 14
+    },
+    "auditLog": "/Users/danielmcshan/GitHub/Naphome-Korvo1/logs/.c17df0a09c11410355893ebecdae655e0a7d061b-audit.json",
+    "files": [
+        {
+            "date": 1764695850593,
+            "name": "/Users/danielmcshan/GitHub/Naphome-Korvo1/logs/mcp-puppeteer-2025-12-02.log",
+            "hash": "18ac2cddc4055b15a41ce34f72e31b5dfc07bb4efada5589bc6f521dbdb7226c"
+        },
+        {
+            "date": 1764784172026,
+            "name": "/Users/danielmcshan/GitHub/Naphome-Korvo1/logs/mcp-puppeteer-2025-12-03.log",
+            "hash": "1a54b594c55bc582f752afdf4fea1dee80f9493a7b944b96b34ed2797005f772"
+        }
+    ],
+    "hashType": "sha256"
+}

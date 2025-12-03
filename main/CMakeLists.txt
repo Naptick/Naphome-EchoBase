@@ -1,14 +1,25 @@
 idf_component_register(
-    SRCS 
+    SRCS
         "app_main.c"
         "audio_player.c"
+        "audio_eq.c"
+        "wake_word_manager.c"
+        "voice_assistant.c"
+        "wifi_manager.c"
     INCLUDE_DIRS "."
     REQUIRES
         led_strip
         helix_mp3
         korvo1
+        openwakeword
+        gemini
         driver
         freertos
         nvs_flash
+        esp_http_client
+        json
+        esp_wifi
+        esp_netif
+        lwip
     EMBED_FILES "../256kMeasSweep_0_to_20000_-12_dBFS_48k_Float_LR_refL.wav"
 )
