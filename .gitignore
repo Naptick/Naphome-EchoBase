@@ -28,6 +28,10 @@ Thumbs.db
 # Logs
 *.log
 
+# Measurements
+measurements/
+*.wav
+
 # Dependencies
 dependencies.lock
 managed_components/

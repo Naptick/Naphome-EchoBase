@@ -23,8 +23,10 @@ typedef struct {
     int default_sample_rate;
 } audio_player_config_t;
 
+typedef void (*audio_progress_callback_t)(float progress, bool playing);
+
 esp_err_t audio_player_init(const audio_player_config_t *cfg);
-esp_err_t audio_player_play_wav(const uint8_t *wav_data, size_t wav_len);
+esp_err_t audio_player_play_wav(const uint8_t *wav_data, size_t wav_len, audio_progress_callback_t progress_cb);
 esp_err_t audio_player_submit_pcm(const int16_t *samples,
                                   size_t sample_count,
                                   int sample_rate_hz,

@@ -9,6 +9,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "led_strip.h"
+// WAV file is embedded via EMBED_FILES
+// Access it via the generated symbol (ESP-IDF generates these symbols automatically)
+extern const uint8_t _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_start[] asm("_binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_start");
+extern const uint8_t _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end[] asm("_binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end");
 #include "mp3_decoder.h"
 #include "nvs_flash.h"
 
@@ -147,77 +151,40 @@ static void update_leds_for_audio(float progress, bool playing)
     led_strip_refresh(s_strip);
 }
 
-// Play log sweep as PCM
+// Play log sweep from embedded WAV file
 static void play_log_sweep_pcm(void)
 {
-    const int sample_rate = CONFIG_AUDIO_SAMPLE_RATE;
-    const float duration_sec = (float)CONFIG_LOG_SWEEP_DURATION_SEC;
-    const float start_freq = (float)CONFIG_LOG_SWEEP_START_FREQ;
-    const float end_freq = (float)CONFIG_LOG_SWEEP_END_FREQ;
+    size_t wav_size = _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end - _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_start;
+    const uint8_t *wav_data = _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_start;
     
-    size_t total_samples = (size_t)(sample_rate * duration_sec);
-    const size_t chunk_size = 1024; // Process in chunks
+    ESP_LOGI(TAG, "Playing embedded log sweep WAV file (%zu bytes)", wav_size);
+    ESP_LOGI(TAG, "WAV file first 16 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+             wav_data[0], wav_data[1], wav_data[2], wav_data[3],
+             wav_data[4], wav_data[5], wav_data[6], wav_data[7],
+             wav_data[8], wav_data[9], wav_data[10], wav_data[11],
+             wav_data[12], wav_data[13], wav_data[14], wav_data[15]);
     
-    ESP_LOGI(TAG, "Generating log sweep: %.1f Hz -> %.1f Hz over %.1f seconds",
-             start_freq, end_freq, duration_sec);
-    ESP_LOGI(TAG, "Total samples: %zu, sample rate: %d Hz", total_samples, sample_rate);
-    
-    int16_t *chunk_buffer = malloc(chunk_size * sizeof(int16_t));
-    if (!chunk_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate chunk buffer");
+    // Verify it's a valid WAV file (RIFF header)
+    if (wav_size < 12 || wav_data[0] != 'R' || wav_data[1] != 'I' || 
+        wav_data[2] != 'F' || wav_data[3] != 'F') {
+        ESP_LOGE(TAG, "Invalid WAV file - missing RIFF header!");
+        update_leds_for_audio(0.0f, false);
         return;
     }
     
-    size_t samples_played = 0;
-    while (samples_played < total_samples) {
-        size_t samples_this_chunk = chunk_size;
-        if (samples_played + samples_this_chunk > total_samples) {
-            samples_this_chunk = total_samples - samples_played;
-        }
-        
-        // Generate chunk of log sweep
-        float chunk_start_time = (float)samples_played / (float)sample_rate;
-        for (size_t i = 0; i < samples_this_chunk; i++) {
-            float t = chunk_start_time + (float)i / (float)sample_rate;
-            float normalized_t = t / duration_sec;
-            
-            // Logarithmic frequency sweep
-            float log_start = logf(start_freq);
-            float log_end = logf(end_freq);
-            float log_range = log_end - log_start;
-            float current_freq = start_freq * expf(log_range * normalized_t);
-            
-            // Generate sine wave
-            float phase = 2.0f * M_PI * current_freq * t;
-            float sample = sinf(phase);
-            chunk_buffer[i] = (int16_t)(sample * 0.3f * 32767.0f);
-        }
-        
-        // Play the chunk
-        esp_err_t err = audio_player_submit_pcm(chunk_buffer, samples_this_chunk, 
-                                                sample_rate, 1);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to submit PCM: %s", esp_err_to_name(err));
-            break;
-        }
-        
-        // Update LED progress
-        float progress = (float)samples_played / (float)total_samples;
-        update_leds_for_audio(progress, true);
-        
-        samples_played += samples_this_chunk;
-        
-        // Small delay to allow I2S to process
-        vTaskDelay(pdMS_TO_TICKS(10));
+    // Play the embedded WAV file with LED progress callback
+    // The callback will update LEDs in sync with audio playback
+    esp_err_t err = audio_player_play_wav(wav_data, 
+                                          wav_size,
+                                          update_leds_for_audio);  // Pass LED update function as callback
+    
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to play WAV file: %s", esp_err_to_name(err));
+        update_leds_for_audio(0.0f, false);  // Turn off LEDs on error
+        return;
     }
     
-    // Final LED update
-    update_leds_for_audio(1.0f, true);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    update_leds_for_audio(0.0f, false);
-    
-    free(chunk_buffer);
-    ESP_LOGI(TAG, "Log sweep playback complete");
+    ESP_LOGI(TAG, "Log sweep WAV playback complete");
 }
 
 // Play MP3 file (if embedded or available)

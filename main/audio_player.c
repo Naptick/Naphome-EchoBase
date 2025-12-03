@@ -1,5 +1,6 @@
 #include "audio_player.h"
 
+#include <inttypes.h>
 #include <string.h>
 
 #include "driver/i2c.h"
@@ -110,6 +111,58 @@ static esp_err_t es8311_probe(void)
     return ESP_FAIL;
 }
 
+static esp_err_t es8311_config_clock_48000(void)
+{
+    // Configure clock for 48000 Hz when use_mclk=false (codec generates MCLK from BCLK)
+    // BCLK = sample_rate * bits_per_sample * channels = 48000 * 16 * 2 = 1.536 MHz
+    // MCLK will be generated internally from BCLK
+    
+    uint8_t regv;
+    
+    // CLK_MANAGER_REG02: pre_div=0 (means 1), pre_multi=3 (x8) when use_mclk=false
+    ESP_RETURN_ON_ERROR(es8311_read_reg(ES8311_CLK_MANAGER_REG02, &regv), TAG, "read clk mgr 2");
+    regv &= 0x07;  // Keep lower 3 bits
+    regv |= (0 << 5);  // pre_div = 1 (register value 0)
+    regv |= (3 << 3);  // pre_multi = x8 (register value 3) when use_mclk=false
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_CLK_MANAGER_REG02, regv), TAG, "clk mgr 2");
+    
+    // CLK_MANAGER_REG05: adc_div=0 (means 1), dac_div=0 (means 1)
+    regv = 0x00;
+    regv |= (0 << 4);  // adc_div = 1 (register value 0)
+    regv |= (0 << 0);  // dac_div = 1 (register value 0)
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_CLK_MANAGER_REG05, regv), TAG, "clk mgr 5");
+    
+    // CLK_MANAGER_REG03: fs_mode=0, adc_osr=0x10
+    ESP_RETURN_ON_ERROR(es8311_read_reg(ES8311_CLK_MANAGER_REG03, &regv), TAG, "read clk mgr 3");
+    regv &= 0x80;  // Keep bit 7
+    regv |= (0 << 6);  // fs_mode = 0
+    regv |= 0x10;  // adc_osr = 0x10
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_CLK_MANAGER_REG03, regv), TAG, "clk mgr 3");
+    
+    // CLK_MANAGER_REG04: dac_osr=0x10
+    ESP_RETURN_ON_ERROR(es8311_read_reg(ES8311_CLK_MANAGER_REG04, &regv), TAG, "read clk mgr 4");
+    regv &= 0x80;  // Keep bit 7
+    regv |= 0x10;  // dac_osr = 0x10
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_CLK_MANAGER_REG04, regv), TAG, "clk mgr 4");
+    
+    // CLK_MANAGER_REG07: lrck_h=0
+    ESP_RETURN_ON_ERROR(es8311_read_reg(ES8311_CLK_MANAGER_REG07, &regv), TAG, "read clk mgr 7");
+    regv &= 0xC0;  // Keep upper 2 bits
+    regv |= 0x00;  // lrck_h = 0
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_CLK_MANAGER_REG07, regv), TAG, "clk mgr 7");
+    
+    // CLK_MANAGER_REG08: lrck_l=0xff
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_CLK_MANAGER_REG08, 0xFF), TAG, "clk mgr 8");
+    
+    // CLK_MANAGER_REG06: bclk_div=4 (register value 3)
+    ESP_RETURN_ON_ERROR(es8311_read_reg(ES8311_CLK_MANAGER_REG06, &regv), TAG, "read clk mgr 6");
+    regv &= 0xE0;  // Keep upper 3 bits
+    regv |= 0x03;  // bclk_div = 4 (register value 3)
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_CLK_MANAGER_REG06, regv), TAG, "clk mgr 6");
+    
+    return ESP_OK;
+}
+
 static esp_err_t es8311_config_clock_44100(void)
 {
     // Configure clock for 44100 Hz when use_mclk=false (codec generates MCLK from BCLK)
@@ -190,21 +243,18 @@ static esp_err_t es8311_init(void)
     // SYSTEM_REG10: HPOUT control - disable headphone output
     // Bit 7 typically enables/disables HPOUT, lower bits are volume
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG10, 0x00), TAG, "sys 10 init"); // Disable HPOUT (bit 7=0)
-    // SYSTEM_REG11: SPKOUT control - enable speaker output
-    // Bit 7 typically enables SPKOUT (1=enable), lower bits are volume
-    // Try 0x80 first (enable only), then we can add volume
-    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG11, 0x80), TAG, "sys 11 init"); // Enable SPKOUT (bit 7=1), min volume
     
-    // Reset
+    // Reset FIRST (this will clear all registers, so we'll set REG11 after reset)
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_RESET_REG00, 0x80), TAG, "reset"); // Reset, slave mode
-    vTaskDelay(pdMS_TO_TICKS(10)); // Small delay after reset
+    vTaskDelay(pdMS_TO_TICKS(20)); // Delay after reset to allow registers to stabilize
     
     // Clock manager: Don't use external MCLK (use_mclk=false), generate from BCLK, no invert, slave mode
     // When use_mclk=false, bit 7 should be set (0xBF = 0x3F | 0x80)
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_CLK_MANAGER_REG01, 0xBF), TAG, "clk mgr 1"); // No external MCLK, generate from BCLK
     
-    // Configure clock for 44100 Hz
-    ESP_RETURN_ON_ERROR(es8311_config_clock_44100(), TAG, "clock config");
+    // Configure clock for 48000 Hz (matching the embedded WAV file)
+    ESP_RETURN_ON_ERROR(es8311_config_clock_48000(), TAG, "clock config");
+    ESP_LOGI(TAG, "ES8311 clock configured for 48000 Hz");
     
     // I2S interface configuration - I2S format, 16-bit
     // Read-modify-write to enable DAC interface (clear bit 6) - must be done after clock config
@@ -227,18 +277,43 @@ static esp_err_t es8311_init(void)
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG12, 0x00), TAG, "sys 12"); // Enable DAC (0x00 = enable)
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG14, 0x1A), TAG, "sys 14"); // Analog PGA gain
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG0D, 0x01), TAG, "sys 0D"); // Power up
-    // SYSTEM_REG0F: Output path selection
-    // First disable all outputs, then enable only SPKOUT
-    // Try disabling HPOUT explicitly by clearing bits 0-1, enabling SPKOUT with bits 2-3
+    vTaskDelay(pdMS_TO_TICKS(20)); // Delay after power up to allow codec to stabilize
+    
+    // SYSTEM_REG0F: Output path selection - MUST be set BEFORE REG11
+    // According to ES8311 datasheet, REG0F controls output path:
+    // Bit 0-1: HPOUT control, Bit 2-3: SPKOUT control
+    // Use 0x0C to enable SPKOUT only (disable HPOUT to avoid routing issues)
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG0F, 0x00), TAG, "sys 0F disable all"); // Disable all first
     vTaskDelay(pdMS_TO_TICKS(10)); // Small delay
-    // Now enable only SPKOUT - try bits 2-3 (0x0C) or maybe it's inverted (need to clear bits 0-1)
-    uint8_t reg0f_value = 0x0C;  // Enable SPKOUT (bits 2,3), disable HPOUT (bits 0,1 clear)
+    
+    // Enable SPKOUT only (0x0C = bits 2-3 set for SPKOUT)
+    uint8_t reg0f_value = 0x0C;  // Enable SPKOUT, disable HPOUT
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG0F, reg0f_value), TAG, "sys 0F enable SPKOUT");
+    vTaskDelay(pdMS_TO_TICKS(10)); // Delay after REG0F
     // Read back to verify
     uint8_t reg0f_readback = 0;
     if (es8311_read_reg(ES8311_SYSTEM_REG0F, &reg0f_readback) == ESP_OK) {
         ESP_LOGI(TAG, "REG0F written=0x%02x, readback=0x%02x", reg0f_value, reg0f_readback);
+    }
+    
+    // SYSTEM_REG11: SPKOUT control - enable speaker output
+    // Bit 7 typically enables SPKOUT (1=enable), lower bits are volume
+    // Write REG11 AFTER REG0F to ensure path is enabled first
+    // Try 0x80 first (just enable bit), then set volume
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG11, 0x80), TAG, "sys 11 enable SPKOUT bit"); // Enable SPKOUT (bit 7=1), min volume
+    vTaskDelay(pdMS_TO_TICKS(10)); // Delay after setting enable bit
+    
+    // Now set volume: 0xFF = max, 0xC0 = ~75% volume
+    // Using 0xC0 for good volume without distortion
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG11, 0xC0), TAG, "sys 11 set SPKOUT volume"); // Enable SPKOUT (bit 7=1) + volume
+    vTaskDelay(pdMS_TO_TICKS(10)); // Delay after setting volume
+    // Read back to verify
+    uint8_t reg11_readback = 0;
+    if (es8311_read_reg(ES8311_SYSTEM_REG11, &reg11_readback) == ESP_OK) {
+        ESP_LOGI(TAG, "REG11 written=0x%02x, readback=0x%02x", 0xC0, reg11_readback);
+        if ((reg11_readback & 0x80) == 0) {
+            ESP_LOGW(TAG, "WARNING: REG11 bit 7 is 0 (SPKOUT may be disabled)!");
+        }
     }
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_ADC_REG15, 0x40), TAG, "adc 15");
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_DAC_REG37, 0x08), TAG, "dac 37"); // Ramp rate
@@ -246,7 +321,9 @@ static esp_err_t es8311_init(void)
     
     // DAC configuration
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_DAC_REG31, 0x00), TAG, "dac 31"); // Unmute
-    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_DAC_REG32, 0xC0), TAG, "dac 32"); // Volume (0xC0 = ~0dB, higher value = louder)
+    // Volume: 0xFF = max, 0xC0 = ~0dB, 0xB0 = ~-3dB, 0xA0 = ~-6dB
+    // Using 0xB0 for -3dB headroom to prevent distortion
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_DAC_REG32, 0xB0), TAG, "dac 32"); // -3dB volume for headroom
     
     // Additional registers from es8311_open
     // SYSTEM_REG13: May control output routing or bias
@@ -273,11 +350,22 @@ static esp_err_t es8311_init(void)
     // Explicitly enable/start the codec (equivalent to esp_codec_dev_open)
     // This ensures the codec is in the correct state for playback
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG0D, 0x01), TAG, "sys 0D enable"); // Ensure power up
+    vTaskDelay(pdMS_TO_TICKS(20));
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG12, 0x00), TAG, "sys 12 enable"); // Ensure DAC enabled
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG10, 0x00), TAG, "sys 10 disable HPOUT"); // Ensure HPOUT disabled
-    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG11, 0x80), TAG, "sys 11 enable SPKOUT"); // Ensure SPKOUT enabled (bit 7=1)
-    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG0F, 0x0C), TAG, "sys 0F enable SPKOUT only"); // Ensure only SPKOUT enabled
+    
+    // Re-verify and re-set REG0F and REG11 to ensure they're correct
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG0F, 0x0C), TAG, "sys 0F re-enable SPKOUT"); // Enable SPKOUT only
+    vTaskDelay(pdMS_TO_TICKS(10));
+    
+    // Write REG11 with 0xFF (max) to ensure bit 7 is definitely set, then reduce to 0xC0
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG11, 0xFF), TAG, "sys 11 max SPKOUT"); // Max volume to ensure enable
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_SYSTEM_REG11, 0xC0), TAG, "sys 11 final SPKOUT"); // Set to desired volume
+    vTaskDelay(pdMS_TO_TICKS(10));
+    
     ESP_RETURN_ON_ERROR(es8311_write_reg(ES8311_DAC_REG31, 0x00), TAG, "dac 31 unmute"); // Ensure unmuted
+    vTaskDelay(pdMS_TO_TICKS(20)); // Final delay to ensure all registers are stable
     
     // Diagnostic: Read back key registers to verify configuration
     uint8_t reg10_val = 0, reg11_val = 0, reg0f_val = 0, reg12_val = 0;
@@ -429,6 +517,7 @@ static esp_err_t write_pcm_frames(const int16_t *samples, size_t sample_count, i
     int16_t stereo_buffer[chunk_frames * 2];
 
     size_t frames_written = 0;
+    static size_t total_frames_written = 0;  // Track total frames for diagnostics
     while (frames_written < sample_count) {
         size_t frames_this = chunk_frames;
         if (frames_this > sample_count - frames_written) {
@@ -449,6 +538,15 @@ static esp_err_t write_pcm_frames(const int16_t *samples, size_t sample_count, i
 
         size_t bytes_to_write = frames_this * sizeof(int16_t) * 2;
         size_t total_written = 0;
+        
+        // Log first chunk to verify audio data
+        static bool first_write_logged = false;
+        if (!first_write_logged && frames_written == 0) {
+            ESP_LOGI(TAG, "First I2S write: %zu frames, first 4 PCM samples: %d, %d, %d, %d",
+                     frames_this, stereo_buffer[0], stereo_buffer[1], stereo_buffer[2], stereo_buffer[3]);
+            first_write_logged = true;
+        }
+        
         while (total_written < bytes_to_write) {
             size_t bytes_written = 0;
             esp_err_t err = i2s_write(s_audio.cfg.i2s_port,
@@ -468,6 +566,12 @@ static esp_err_t write_pcm_frames(const int16_t *samples, size_t sample_count, i
             total_written += bytes_written;
         }
         frames_written += frames_this;
+        total_frames_written += frames_this;
+        
+        // Log every 10000 frames (~0.23 seconds at 44.1kHz) to track playback
+        if (total_frames_written % 10000 == 0) {
+            ESP_LOGI(TAG, "Audio playback: %zu frames written to I2S", total_frames_written);
+        }
     }
     return ESP_OK;
 }
@@ -487,15 +591,38 @@ typedef struct __attribute__((packed)) {
     uint16_t bits_per_sample;
 } wav_fmt_body_t;
 
-esp_err_t audio_player_play_wav(const uint8_t *wav_data, size_t wav_len)
+esp_err_t audio_player_play_wav(const uint8_t *wav_data, size_t wav_len, audio_progress_callback_t progress_cb)
 {
     ESP_RETURN_ON_FALSE(s_audio.initialized, ESP_ERR_INVALID_STATE, TAG, "not init");
     ESP_RETURN_ON_FALSE(wav_data && wav_len > sizeof(wav_header_t), ESP_ERR_INVALID_ARG, TAG, "bad wav");
+
+    // Debug: log first few bytes to verify data
+    ESP_LOGI(TAG, "=== WAV FILE VERIFICATION ===");
+    ESP_LOGI(TAG, "WAV data: len=%zu bytes (%.2f MB)", wav_len, wav_len / (1024.0f * 1024.0f));
+    ESP_LOGI(TAG, "First 32 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+             wav_data[0], wav_data[1], wav_data[2], wav_data[3],
+             wav_data[4], wav_data[5], wav_data[6], wav_data[7],
+             wav_data[8], wav_data[9], wav_data[10], wav_data[11],
+             wav_data[12], wav_data[13], wav_data[14], wav_data[15],
+             wav_data[16], wav_data[17], wav_data[18], wav_data[19],
+             wav_data[20], wav_data[21], wav_data[22], wav_data[23],
+             wav_data[24], wav_data[25], wav_data[26], wav_data[27],
+             wav_data[28], wav_data[29], wav_data[30], wav_data[31]);
+    
+    // Check RIFF header
+    if (wav_len >= 4 && wav_data[0] == 'R' && wav_data[1] == 'I' && wav_data[2] == 'F' && wav_data[3] == 'F') {
+        ESP_LOGI(TAG, "✓ Valid RIFF header");
+    } else {
+        ESP_LOGE(TAG, "✗ INVALID RIFF HEADER! First 4 bytes: %02x %02x %02x %02x",
+                 wav_data[0], wav_data[1], wav_data[2], wav_data[3]);
+        return ESP_ERR_INVALID_ARG;
+    }
 
     const uint8_t *ptr = wav_data;
     const uint8_t *end = wav_data + wav_len;
     const wav_header_t *hdr = (const wav_header_t *)ptr;
     if (memcmp(hdr->chunk_id, "RIFF", 4) != 0 || memcmp(hdr->format, "WAVE", 4) != 0) {
+        ESP_LOGE(TAG, "Invalid WAV header: chunk_id=%.4s, format=%.4s", hdr->chunk_id, hdr->format);
         return ESP_ERR_INVALID_ARG;
     }
     ptr += sizeof(wav_header_t);
@@ -511,20 +638,37 @@ esp_err_t audio_player_play_wav(const uint8_t *wav_data, size_t wav_len)
         uint32_t chunk_size = *(const uint32_t *)(ptr + 4);
         ptr += 8;
         if (ptr + chunk_size > end) {
+            ESP_LOGE(TAG, "Chunk extends beyond end: chunk_size=%" PRIu32 ", remaining=%zu", chunk_size, end - ptr);
             return ESP_ERR_INVALID_ARG;
         }
 
         if (!fmt_found && memcmp(chunk_id, "fmt ", 4) == 0) {
-            if (chunk_size < sizeof(wav_fmt_body_t)) {
+            ESP_LOGI(TAG, "Found fmt chunk, size=%" PRIu32, chunk_size);
+            if (chunk_size < 16) {
+                ESP_LOGE(TAG, "fmt chunk too small: %" PRIu32 " < 16", chunk_size);
                 return ESP_ERR_INVALID_ARG;
             }
-            memcpy(&fmt, ptr, sizeof(wav_fmt_body_t));
+            // Read fmt chunk - standard is 16 bytes, but we support up to sizeof(wav_fmt_body_t)
+            memset(&fmt, 0, sizeof(wav_fmt_body_t));  // Zero out first
+            size_t bytes_to_read = chunk_size < sizeof(wav_fmt_body_t) ? chunk_size : sizeof(wav_fmt_body_t);
+            memcpy(&fmt, ptr, bytes_to_read);  // Copy available bytes
             fmt_found = true;
+            ESP_LOGI(TAG, "WAV format: audio_format=%u, channels=%u, sample_rate=%" PRIu32 ", bits_per_sample=%u",
+                     fmt.audio_format, fmt.num_channels, fmt.sample_rate, fmt.bits_per_sample);
+            // Advance past the fmt chunk data (word-aligned)
+            uint32_t advance = chunk_size;
+            if (advance & 1) {
+                advance++;  // WAV chunks are word-aligned
+            }
+            ptr += advance;
+            continue;  // Continue to next chunk
         } else if (memcmp(chunk_id, "data", 4) == 0) {
+            ESP_LOGI(TAG, "Found data chunk, size=%" PRIu32, chunk_size);
             data_ptr = ptr;
             data_size = chunk_size;
             break;
         } else {
+            ESP_LOGD(TAG, "Skipping chunk: %.4s, size=%" PRIu32, chunk_id, chunk_size);
             uint32_t advance = chunk_size;
             if (advance & 1) {
                 advance++;
@@ -533,15 +677,230 @@ esp_err_t audio_player_play_wav(const uint8_t *wav_data, size_t wav_len)
         }
     }
 
-    ESP_RETURN_ON_FALSE(fmt_found && data_ptr, ESP_ERR_INVALID_ARG, TAG, "wav missing fmt/data");
-    ESP_RETURN_ON_FALSE(fmt.audio_format == 1, ESP_ERR_NOT_SUPPORTED, TAG, "PCM required");
-    ESP_RETURN_ON_FALSE(fmt.bits_per_sample == 16, ESP_ERR_NOT_SUPPORTED, TAG, "16-bit required");
+    if (!fmt_found) {
+        ESP_LOGE(TAG, "WAV file missing fmt chunk");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!data_ptr) {
+        ESP_LOGE(TAG, "WAV file missing data chunk (searched %zu bytes, ptr now at offset %zu from start)",
+                 (size_t)(ptr - wav_data), (size_t)(ptr - wav_data));
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_LOGI(TAG, "WAV file parsed successfully: fmt found, data chunk found, data_size=%" PRIu32, data_size);
+    
+    // Support both PCM (format 1) and IEEE float (format 3)
+    bool is_float = (fmt.audio_format == 3);
+    bool is_pcm = (fmt.audio_format == 1);
+    if (!is_pcm && !is_float) {
+        ESP_LOGE(TAG, "Unsupported audio format: %u (expected 1=PCM or 3=float)", fmt.audio_format);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    
+    // For float, require 32-bit; for PCM, require 16-bit
+    if (is_float) {
+        if (fmt.bits_per_sample != 32) {
+            ESP_LOGE(TAG, "Unsupported float bit depth: %u (expected 32)", fmt.bits_per_sample);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        ESP_LOGI(TAG, "Processing 32-bit float WAV, sample_rate=%" PRIu32 ", channels=%u", fmt.sample_rate, fmt.num_channels);
+    } else {
+        if (fmt.bits_per_sample != 16) {
+            ESP_LOGE(TAG, "Unsupported PCM bit depth: %u (expected 16)", fmt.bits_per_sample);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        ESP_LOGI(TAG, "Processing 16-bit PCM WAV, sample_rate=%" PRIu32 ", channels=%u", fmt.sample_rate, fmt.num_channels);
+    }
 
-    size_t sample_count = data_size / (fmt.bits_per_sample / 8);
-    const int16_t *samples = (const int16_t *)data_ptr;
-
+    ESP_LOGI(TAG, "Setting playback sample rate to %" PRIu32 " Hz", fmt.sample_rate);
     ESP_RETURN_ON_ERROR(ensure_sample_rate(fmt.sample_rate), TAG, "sr");
-    return write_pcm_frames(samples, sample_count / fmt.num_channels, fmt.num_channels);
+    ESP_LOGI(TAG, "I2S sample rate configured to %" PRIu32 " Hz", fmt.sample_rate);
+    
+    if (is_float) {
+        // Convert 32-bit float to 16-bit PCM
+        // Calculate frame count: data_size bytes / (bytes_per_sample * channels)
+        size_t bytes_per_sample = fmt.bits_per_sample / 8;
+        size_t bytes_per_frame = bytes_per_sample * fmt.num_channels;
+        size_t frame_count = data_size / bytes_per_frame;
+        const uint8_t *float_data = data_ptr;  // Keep as uint8_t to avoid direct flash access
+        
+        ESP_LOGI(TAG, "Float conversion: data_size=%u, bytes_per_frame=%u, frame_count=%u", 
+                 (unsigned int)data_size, (unsigned int)bytes_per_frame, (unsigned int)frame_count);
+        ESP_LOGI(TAG, "Expected duration: %.2f seconds at %" PRIu32 " Hz", 
+                 (float)frame_count / (float)fmt.sample_rate, fmt.sample_rate);
+        
+        // Allocate buffers: one for float samples from flash (RAM copy), one for PCM output
+        const size_t chunk_size = 1024;  // frames per chunk
+        const size_t three_second_frame = (size_t)fmt.sample_rate * 3;  // Frame number at 3 seconds
+        bool three_second_logged = false;
+        bool signal_start_logged = false;  // Track when actual audio signal starts
+        float *float_buffer = malloc(chunk_size * sizeof(float) * fmt.num_channels);
+        int16_t *pcm_buffer = malloc(chunk_size * sizeof(int16_t) * fmt.num_channels);
+        if (!float_buffer || !pcm_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate conversion buffers");
+            free(float_buffer);
+            free(pcm_buffer);
+            return ESP_ERR_NO_MEM;
+        }
+        
+        size_t frames_processed = 0;
+        esp_err_t err = ESP_OK;
+        
+        while (frames_processed < frame_count && err == ESP_OK) {
+            size_t frames_this_chunk = chunk_size;
+            if (frames_processed + frames_this_chunk > frame_count) {
+                frames_this_chunk = frame_count - frames_processed;
+            }
+            
+            // Copy float samples from flash to RAM first (to avoid cache issues)
+            // Calculate source offset in bytes (frames * bytes_per_frame)
+            size_t byte_offset = frames_processed * bytes_per_frame;
+            size_t float_bytes_this_chunk = frames_this_chunk * bytes_per_frame;
+            const uint8_t *src = float_data + byte_offset;
+            
+            // Verify we're not reading past the data
+            if (byte_offset + float_bytes_this_chunk > data_size) {
+                ESP_LOGE(TAG, "Read would exceed data size: offset=%u, chunk=%u, total=%u", 
+                         (unsigned int)byte_offset, (unsigned int)float_bytes_this_chunk, (unsigned int)data_size);
+                err = ESP_ERR_INVALID_ARG;
+                break;
+            }
+            
+            // Copy from flash to RAM - memcpy should work if flash is properly mapped
+            // If this fails, the embedded binary might not be accessible
+            memcpy(float_buffer, src, float_bytes_this_chunk);
+            
+            // Convert float to int16
+            // Add headroom (90%) to prevent clipping and distortion
+            static bool first_chunk_logged = false;
+            float max_amp_this_chunk = 0.0f;
+            const float headroom = 0.90f;  // 90% of full scale for headroom
+            const float pcm_scale = 32767.0f * headroom;  // ~29490 for headroom
+            
+            for (size_t i = 0; i < frames_this_chunk * fmt.num_channels; i++) {
+                float sample_f = float_buffer[i];
+                float abs_sample = sample_f < 0.0f ? -sample_f : sample_f;
+                if (abs_sample > max_amp_this_chunk) {
+                    max_amp_this_chunk = abs_sample;
+                }
+                // Clamp to [-1.0, 1.0] range
+                if (sample_f > 1.0f) sample_f = 1.0f;
+                if (sample_f < -1.0f) sample_f = -1.0f;
+                // Apply headroom to prevent clipping
+                pcm_buffer[i] = (int16_t)(sample_f * pcm_scale);
+                
+                // Log first few samples for verification
+                if (!first_chunk_logged && i < 8) {
+                    ESP_LOGI(TAG, "First samples [%zu]: float=%.6f, PCM=%d", 
+                             i, sample_f, pcm_buffer[i]);
+                    if (i == 7) first_chunk_logged = true;
+                }
+            }
+            
+            // Detect when actual audio signal starts (chirp begins)
+            if (!signal_start_logged && max_amp_this_chunk > 0.001f) {
+                float time_seconds = (float)frames_processed / (float)fmt.sample_rate;
+                ESP_LOGI(TAG, "*** AUDIO SIGNAL DETECTED (chirp starts) at frame %zu (%.3f seconds), max_amp=%.6f ***",
+                         frames_processed, time_seconds, max_amp_this_chunk);
+                
+                // Log sample values around the chirp start for verification
+                ESP_LOGI(TAG, "Chirp samples (first 10 after detection):");
+                for (size_t j = 0; j < 10 && j < frames_this_chunk * fmt.num_channels; j++) {
+                    float sample_val = float_buffer[j];
+                    int16_t pcm_val = pcm_buffer[j];
+                    ESP_LOGI(TAG, "  [%zu]: float=%.6f, PCM=%d", j, sample_val, pcm_val);
+                }
+                
+                signal_start_logged = true;
+            }
+            
+            // Log amplitude statistics during chirp (first 2 seconds after detection)
+            if (signal_start_logged && frames_processed < (size_t)fmt.sample_rate * 5) {
+                static size_t last_amp_log = 0;
+                if (frames_processed - last_amp_log >= (size_t)fmt.sample_rate / 2) {  // Every 0.5 seconds
+                    float time_seconds = (float)frames_processed / (float)fmt.sample_rate;
+                    ESP_LOGI(TAG, "Chirp amplitude at %.2fs: max=%.6f (PCM range: %d to %d)",
+                             time_seconds, max_amp_this_chunk,
+                             pcm_buffer[0], pcm_buffer[frames_this_chunk * fmt.num_channels - 1]);
+                    last_amp_log = frames_processed;
+                }
+            }
+            
+            // Write PCM frames
+            err = write_pcm_frames(pcm_buffer, frames_this_chunk, fmt.num_channels);
+            
+            frames_processed += frames_this_chunk;
+            
+            // Log when we reach 3 seconds (where the chirp should be)
+            if (!three_second_logged && frames_processed >= three_second_frame) {
+                float time_seconds = (float)frames_processed / (float)fmt.sample_rate;
+                ESP_LOGI(TAG, "*** REACHED 3 SECOND MARK (chirp location) at frame %zu (%.2f seconds) ***", 
+                         frames_processed, time_seconds);
+                three_second_logged = true;
+            }
+            
+            // Update progress callback if provided (after updating frames_processed)
+            if (progress_cb && err == ESP_OK) {
+                float progress = (float)frames_processed / (float)frame_count;
+                if (progress > 1.0f) progress = 1.0f;
+                progress_cb(progress, true);
+            }
+            
+            // Log progress every 5 seconds
+            static size_t last_log_frame = 0;
+            if (frames_processed - last_log_frame >= fmt.sample_rate * 5) {
+                float time_seconds = (float)frames_processed / (float)fmt.sample_rate;
+                ESP_LOGI(TAG, "Playback progress: %.1f seconds (%.1f%%)", 
+                         time_seconds, (float)frames_processed * 100.0f / (float)frame_count);
+                last_log_frame = frames_processed;
+            }
+        }
+        
+        // Final progress update
+        if (progress_cb) {
+            progress_cb(1.0f, true);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            progress_cb(0.0f, false);
+        }
+        
+        free(float_buffer);
+        free(pcm_buffer);
+        return err;
+    } else {
+        // Direct PCM playback
+        size_t sample_count = data_size / (fmt.bits_per_sample / 8);
+        size_t frame_count = sample_count / fmt.num_channels;
+        const int16_t *samples = (const int16_t *)data_ptr;
+        
+        // For PCM, we can update progress during playback
+        if (progress_cb) {
+            const size_t update_interval = 1024; // Update every 1024 frames
+            size_t frames_written = 0;
+            
+            while (frames_written < frame_count) {
+                size_t frames_this_batch = update_interval;
+                if (frames_written + frames_this_batch > frame_count) {
+                    frames_this_batch = frame_count - frames_written;
+                }
+                
+                esp_err_t err = write_pcm_frames(samples + (frames_written * fmt.num_channels), 
+                                                 frames_this_batch, fmt.num_channels);
+                if (err != ESP_OK) {
+                    return err;
+                }
+                
+                frames_written += frames_this_batch;
+                float progress = (float)frames_written / (float)frame_count;
+                progress_cb(progress, true);
+            }
+            
+            progress_cb(1.0f, true);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            progress_cb(0.0f, false);
+            return ESP_OK;
+        } else {
+            return write_pcm_frames(samples, frame_count, fmt.num_channels);
+        }
+    }
 }
 
 esp_err_t audio_player_submit_pcm(const int16_t *samples,

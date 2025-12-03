@@ -10,4 +10,5 @@ idf_component_register(
         driver
         freertos
         nvs_flash
+    EMBED_FILES "../256kMeasSweep_0_to_20000_-12_dBFS_48k_Float_LR_refL.wav"
 )
