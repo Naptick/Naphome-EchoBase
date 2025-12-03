@@ -226,95 +226,52 @@ void voice_assistant_deinit(void)
     ESP_LOGI(TAG, "Voice assistant deinitialized");
 }
 
-// Test TTS function - generate and play audio from text
+// Streaming TTS playback callback
+// Called with decoded PCM audio chunks as they arrive from the API
+static esp_err_t tts_playback_callback(const int16_t *samples, size_t sample_count, void *user_data)
+{
+    // user_data is unused, but could be used to pass state if needed
+    (void)user_data;
+
+    if (!samples || sample_count == 0) {
+        return ESP_OK;
+    }
+
+    // Submit PCM chunk directly to audio player (24kHz, mono)
+    // This avoids buffering entire audio in memory
+    return audio_player_submit_pcm(samples, sample_count, 24000, 1);
+}
+
+// Test TTS function - generate and play audio from text using streaming
 esp_err_t voice_assistant_test_tts(const char *text)
 {
     if (!s_initialized) {
         ESP_LOGE(TAG, "Voice assistant not initialized");
         return ESP_ERR_INVALID_STATE;
     }
-    
+
     ESP_LOGI(TAG, "🎤 Testing TTS with text: \"%s\"", text);
-    
-    // Allocate buffer for TTS audio (24kHz, mono, ~3 seconds max)
-    // Reduced to fit in available internal RAM (192KB largest block)
-    const size_t tts_buffer_size = 72000; // 3 seconds at 24kHz = 144KB
-    size_t buffer_bytes = tts_buffer_size * sizeof(int16_t);
-    
-    int16_t *tts_audio = NULL;
-    
+
     // Check available memory for diagnostics
     size_t total_free = esp_get_free_heap_size();
-    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    size_t largest_spiram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     size_t largest_default = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
-    
-    ESP_LOGI(TAG, "Memory check: Total free=%lu bytes, Need=%lu bytes", 
-             (unsigned long)total_free, (unsigned long)buffer_bytes);
-    ESP_LOGI(TAG, "  Internal: free=%lu, largest=%lu", 
-             (unsigned long)internal_free, (unsigned long)largest_internal);
-    ESP_LOGI(TAG, "  PSRAM: free=%lu, largest=%lu", 
-             (unsigned long)spiram_free, (unsigned long)largest_spiram);
-    ESP_LOGI(TAG, "  Default: largest=%lu", (unsigned long)largest_default);
-    
-    // Try PSRAM first (if available and large enough)
-    if (spiram_free >= buffer_bytes && largest_spiram >= buffer_bytes) {
-        ESP_LOGI(TAG, "Attempting PSRAM allocation...");
-        tts_audio = (int16_t *)heap_caps_malloc(buffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (tts_audio) {
-            ESP_LOGI(TAG, "✅ TTS buffer allocated from PSRAM: %lu bytes", (unsigned long)buffer_bytes);
-        } else {
-            ESP_LOGW(TAG, "PSRAM allocation failed, trying default heap...");
-        }
-    }
-    
-    // Fall back to default heap (which may include PSRAM if configured)
-    if (!tts_audio) {
-        tts_audio = (int16_t *)heap_caps_malloc(buffer_bytes, MALLOC_CAP_8BIT);
-        if (tts_audio) {
-            ESP_LOGI(TAG, "✅ TTS buffer allocated from default heap: %lu bytes", (unsigned long)buffer_bytes);
-        }
-    }
-    
-    // Last resort: try regular malloc
-    if (!tts_audio) {
-        tts_audio = (int16_t *)malloc(buffer_bytes);
-        if (tts_audio) {
-            ESP_LOGI(TAG, "✅ TTS buffer allocated via malloc: %lu bytes", (unsigned long)buffer_bytes);
-        }
-    }
-    
-    if (!tts_audio) {
-        ESP_LOGE(TAG, "Failed to allocate TTS buffer (%lu bytes)", (unsigned long)buffer_bytes);
-        ESP_LOGE(TAG, "Total free heap: %lu bytes, Largest free block: %lu bytes", 
-                 (unsigned long)total_free, (unsigned long)largest_default);
-        return ESP_ERR_NO_MEM;
-    }
-    
-    size_t samples_written = 0;
-    esp_err_t ret = gemini_tts(text, tts_audio, tts_buffer_size, &samples_written);
+
+    ESP_LOGI(TAG, "Memory before streaming TTS: Total free=%lu bytes, Largest block=%lu bytes",
+             (unsigned long)total_free, (unsigned long)largest_default);
+
+    // Use streaming TTS - audio chunks are decoded and played as they arrive
+    // No need to allocate 80KB buffer for entire audio
+    esp_err_t ret = gemini_tts_streaming(text, tts_playback_callback, NULL);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "TTS generation failed: %s", esp_err_to_name(ret));
-        free(tts_audio);
+        ESP_LOGE(TAG, "Streaming TTS failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    
-    ESP_LOGI(TAG, "✅ TTS generated %zu samples (%.2f seconds at 24kHz)", 
-             samples_written, (float)samples_written / 24000.0f);
-    
-    // Play audio through audio player
-    // audio_player_submit_pcm automatically handles sample rate conversion via ensure_sample_rate
-    ret = audio_player_submit_pcm(tts_audio, samples_written, 24000, 1); // Mono, 24kHz
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Audio playback submission failed: %s", esp_err_to_name(ret));
-        ESP_LOGW(TAG, "Note: TTS outputs 24kHz, but player may expect 48kHz - resampling may be needed");
-    } else {
-        ESP_LOGI(TAG, "✅ TTS audio submitted for playback");
-    }
-    
-    // Free the buffer
-    free(tts_audio);
-    return ret;
+
+    ESP_LOGI(TAG, "✅ Streaming TTS completed successfully");
+
+    // Log free memory after TTS
+    size_t free_heap_after = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    ESP_LOGI(TAG, "Memory after streaming TTS: %lu bytes free", (unsigned long)free_heap_after);
+
+    return ESP_OK;
 }

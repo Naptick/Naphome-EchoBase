@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 #include "cJSON.h"
 #include "mbedtls/base64.h"
+#include "streaming_base64.h"
 #include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -41,42 +42,18 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
             ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
             break;
         case HTTP_EVENT_ON_DATA:
-            ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA: data_len=%d, chunked=%d, buf=%p", evt->data_len, esp_http_client_is_chunked_response(evt->client), buf);
             if (evt->data_len == 0) {
-                ESP_LOGW(TAG, "Received zero-length data event");
                 break;
             }
-            // Handle both chunked and non-chunked responses the same way
+            // Check if buffer would overflow
             if (buf->len + evt->data_len > buf->cap) {
-                // Exponential growth with minimum 16KB to avoid repeated allocations
-                // Use smaller initial size to be more conservative with memory on embedded systems
-                size_t new_cap = buf->cap ? buf->cap * 2 : 16384;  // Start with 16KB
-                while (new_cap < buf->len + evt->data_len) {
-                    new_cap *= 2;
-                }
-                // Cap maximum size to 256KB to avoid runaway allocation
-                if (new_cap > 262144) {
-                    ESP_LOGE(TAG, "Response too large (would be %zu bytes)", new_cap);
-                    return ESP_ERR_NO_MEM;
-                }
-                uint8_t *new_mem = realloc(buf->data, new_cap);
-                if (!new_mem) {
-                    ESP_LOGE(TAG, "Failed to realloc response buffer from %zu to %zu bytes (free heap may be low)", buf->cap, new_cap);
-                    // Try smaller allocation
-                    new_cap = buf->cap ? buf->cap + 4096 : 8192;
-                    new_mem = realloc(buf->data, new_cap);
-                    if (!new_mem) {
-                        ESP_LOGE(TAG, "Failed to allocate even smaller buffer");
-                        return ESP_ERR_NO_MEM;
-                    }
-                }
-                buf->data = new_mem;
-                buf->cap = new_cap;
-                ESP_LOGD(TAG, "Reallocated buffer to %zu bytes", new_cap);
+                // Don't log in interrupt handler - it blocks the main task from watchdog
+                // Pre-allocated buffer should be sufficient for Gemini API responses
+                return ESP_ERR_NO_MEM;
             }
+            // Copy data to buffer (safe, no realloc needed)
             memcpy(buf->data + buf->len, evt->data, evt->data_len);
             buf->len += evt->data_len;
-            ESP_LOGD(TAG, "Buffered %d bytes, total: %zu/%zu", evt->data_len, buf->len, buf->cap);
             break;
         case HTTP_EVENT_ON_FINISH:
             ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
@@ -155,12 +132,44 @@ static esp_err_t base64_encode_alloc(const uint8_t *input, size_t input_len, cha
 // HTTP POST request helper with proper response handling
 static esp_err_t http_post_json_with_auth(const char *url, const char *json_data, const char *auth_header, http_buffer_t *response)
 {
-    // Log available memory before request
-    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t free_spiram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    size_t free_default = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
-    ESP_LOGI(TAG, "Memory before HTTP: internal=%zu, spiram=%zu, default=%zu",
-             free_internal, free_spiram, free_default);
+    // Determine buffer size based on API endpoint
+    // TTS responses are base64-encoded (35-50KB raw response, ~26-37KB after base64 decode)
+    // LLM responses are JSON text (~20-40KB)
+    // Device has only ~250KB free heap, so be conservative
+    size_t RESPONSE_BUFFER_SIZE = 40 * 1024;  // Default 40KB for LLM
+
+    // Check if this is a TTS request (slightly larger buffer)
+    if (strstr(url, "texttospeech") != NULL) {
+        RESPONSE_BUFFER_SIZE = 64 * 1024;  // TTS: 64KB (base64-encoded audio + JSON envelope)
+    }
+
+    if (!response->data) {
+        // Allocate fixed-size buffer from heap
+        response->data = malloc(RESPONSE_BUFFER_SIZE);
+        if (!response->data) {
+            // If allocation fails, try smaller buffer (32KB)
+            const size_t FALLBACK_SIZE = 32 * 1024;
+            ESP_LOGW(TAG, "Primary allocation (%zu bytes) failed, trying fallback (32KB)", RESPONSE_BUFFER_SIZE);
+            response->data = malloc(FALLBACK_SIZE);
+            if (!response->data) {
+                // Last resort: 24KB minimum buffer
+                const size_t MINIMUM_SIZE = 24 * 1024;
+                ESP_LOGW(TAG, "Fallback allocation (32KB) failed, trying minimum (24KB)");
+                response->data = malloc(MINIMUM_SIZE);
+                if (!response->data) {
+                    ESP_LOGE(TAG, "Failed to allocate even 24KB response buffer");
+                    return ESP_ERR_NO_MEM;
+                }
+                response->cap = MINIMUM_SIZE;
+            } else {
+                response->cap = FALLBACK_SIZE;
+            }
+        } else {
+            response->cap = RESPONSE_BUFFER_SIZE;
+        }
+        response->len = 0;
+        ESP_LOGD(TAG, "Allocated response buffer: %zu bytes", response->cap);
+    }
 
     esp_http_client_config_t config = {
         .url = url,
@@ -561,6 +570,174 @@ esp_err_t gemini_tts(const char *text, int16_t *audio_out, size_t audio_len, siz
     
     cJSON_Delete(response_json);
     ESP_LOGE(TAG, "❌ [Gemini TTS] Failed to extract audioContent from response");
+    return ESP_FAIL;
+}
+
+/**
+ * Context structure for streaming TTS with callback
+ */
+typedef struct {
+    streaming_base64_decoder_t decoder;
+    gemini_tts_playback_callback_t callback;
+    void *user_data;
+    const char *base64_audio;  // Pointer to base64 string in response JSON
+    size_t base64_pos;         // Current position in base64_audio
+    size_t base64_len;         // Total length of base64_audio
+    uint8_t decode_buf[1024];  // Buffer for decoded PCM chunks
+    bool in_audio_content;     // Are we inside audioContent field?
+} streaming_tts_context_t;
+
+esp_err_t gemini_tts_streaming(const char *text, gemini_tts_playback_callback_t callback, void *user_data)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!text || !callback) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "🔊 [Gemini TTS Streaming] Generating speech: \"%.100s%s\"",
+             text, strlen(text) > 100 ? "..." : "");
+
+    // Build JSON request for Google Cloud Text-to-Speech API
+    cJSON *root = cJSON_CreateObject();
+    cJSON *input = cJSON_CreateObject();
+    cJSON *voice = cJSON_CreateObject();
+    cJSON *audioConfig = cJSON_CreateObject();
+
+    cJSON_AddItemToObject(root, "input", input);
+    cJSON_AddItemToObject(root, "voice", voice);
+    cJSON_AddItemToObject(root, "audioConfig", audioConfig);
+
+    cJSON_AddStringToObject(input, "text", text);
+    cJSON_AddStringToObject(voice, "languageCode", "en-US");
+    cJSON_AddStringToObject(voice, "name", "en-US-Neural2-D");
+    cJSON_AddStringToObject(audioConfig, "audioEncoding", "LINEAR16");
+    cJSON_AddNumberToObject(audioConfig, "sampleRateHertz", 24000);
+
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!payload) {
+        ESP_LOGE(TAG, "Failed to create JSON payload");
+        return ESP_ERR_NO_MEM;
+    }
+
+    char url[512];
+    snprintf(url, sizeof(url),
+             "https://texttospeech.googleapis.com/v1/text:synthesize?key=%s",
+             s_config.api_key);
+
+    // Perform HTTP request - using standard buffering for JSON response
+    http_buffer_t http_response = {0};
+    esp_err_t ret = http_post_json_with_auth(url, payload, NULL, &http_response);
+    free(payload);
+
+    if (ret != ESP_OK) {
+        if (http_response.data) free(http_response.data);
+        return ret;
+    }
+
+    // Parse response to extract base64 audio
+    if (!http_response.data || http_response.len == 0) {
+        ESP_LOGE(TAG, "Empty response");
+        if (http_response.data) free(http_response.data);
+        return ESP_FAIL;
+    }
+
+    // Null-terminate for JSON parsing (buffer has room since allocated with extra space)
+    if (http_response.len < http_response.cap) {
+        http_response.data[http_response.len] = '\0';
+    } else {
+        // Buffer is exactly full - shouldn't happen with our allocation strategy
+        // but safe handling here
+        ESP_LOGE(TAG, "Response buffer is full, cannot null-terminate");
+        free(http_response.data);
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON *response_json = cJSON_Parse((char *)http_response.data);
+
+    if (!response_json) {
+        ESP_LOGE(TAG, "Failed to parse JSON response");
+        // Log first 200 chars of response for debugging
+        if (http_response.data && http_response.len > 0) {
+            char debug_buf[201];
+            size_t debug_len = (http_response.len > 200) ? 200 : http_response.len;
+            memcpy(debug_buf, http_response.data, debug_len);
+            debug_buf[debug_len] = '\0';
+            ESP_LOGI(TAG, "Response start: %.200s", debug_buf);
+        }
+        free(http_response.data);
+        return ESP_FAIL;
+    }
+
+    free(http_response.data);
+
+    cJSON *audioContent = cJSON_GetObjectItem(response_json, "audioContent");
+    if (audioContent && cJSON_IsString(audioContent)) {
+        const char *base64_audio = audioContent->valuestring;
+        size_t base64_len = strlen(base64_audio);
+
+        // Initialize streaming decoder
+        streaming_base64_decoder_t decoder;
+        streaming_base64_decoder_init(&decoder);
+
+        // Process base64 in chunks, streaming decoded audio
+        uint8_t decode_buf[1024];
+        size_t pos = 0;
+        size_t total_samples = 0;
+
+        while (pos < base64_len) {
+            // Take up to 256 base64 characters at a time (decodes to ~192 bytes = 96 PCM samples)
+            size_t chunk_size = (base64_len - pos > 256) ? 256 : (base64_len - pos);
+
+            size_t decode_buf_size = sizeof(decode_buf);
+            esp_err_t decode_ret = streaming_base64_decode(
+                &decoder,
+                (const uint8_t *)(base64_audio + pos),
+                chunk_size,
+                decode_buf,
+                &decode_buf_size);
+
+            if (decode_ret != ESP_OK) {
+                ESP_LOGE(TAG, "Base64 decode failed at position %zu", pos);
+                cJSON_Delete(response_json);
+                return ESP_FAIL;
+            }
+
+            // Stream decoded PCM to callback
+            if (decode_buf_size > 0) {
+                size_t sample_count = decode_buf_size / sizeof(int16_t);
+                esp_err_t callback_ret = callback((int16_t *)decode_buf, sample_count, user_data);
+                if (callback_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "Callback returned error, stopping streaming");
+                    cJSON_Delete(response_json);
+                    return callback_ret;
+                }
+                total_samples += sample_count;
+            }
+
+            pos += chunk_size;
+        }
+
+        // Finalize any remaining bytes
+        size_t final_size = sizeof(decode_buf);
+        esp_err_t final_ret = streaming_base64_decode_finish(&decoder, decode_buf, &final_size);
+        if (final_ret == ESP_OK && final_size > 0) {
+            size_t final_samples = final_size / sizeof(int16_t);
+            callback((int16_t *)decode_buf, final_samples, user_data);
+            total_samples += final_samples;
+        }
+
+        cJSON_Delete(response_json);
+        ESP_LOGI(TAG, "✅ [Gemini TTS Streaming] Success: %zu samples streamed (%.2f seconds at 24kHz)",
+                 total_samples, (float)total_samples / 24000.0f);
+        return ESP_OK;
+    }
+
+    cJSON_Delete(response_json);
+    ESP_LOGE(TAG, "❌ [Gemini TTS Streaming] Failed to extract audioContent from response");
     return ESP_FAIL;
 }
 
