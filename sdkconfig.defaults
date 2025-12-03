@@ -22,5 +22,10 @@ CONFIG_GEMINI_MODEL="gemini-2.5-flash"
 CONFIG_WIFI_SSID="The Chateau"
 CONFIG_WIFI_PASSWORD="thechateau"
 
-# Note: ESP32-S3 has embedded PSRAM (8MB) which is automatically available
-# No special configuration needed - malloc() will use it automatically
+# Enable PSRAM (8MB embedded PSRAM on ESP32-S3)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SIZE=8388608
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_EXEC_MEMORY=y

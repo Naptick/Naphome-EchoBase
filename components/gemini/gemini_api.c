@@ -140,7 +140,7 @@ static esp_err_t http_post_json_with_auth(const char *url, const char *json_data
 
     // Check if this is a TTS request (slightly larger buffer)
     if (strstr(url, "texttospeech") != NULL) {
-        RESPONSE_BUFFER_SIZE = 64 * 1024;  // TTS: 64KB (base64-encoded audio + JSON envelope)
+        RESPONSE_BUFFER_SIZE = 72 * 1024;  // TTS: 72KB (base64-encoded audio ~65.5KB + JSON envelope)
     }
 
     if (!response->data) {
