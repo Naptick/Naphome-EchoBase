@@ -1,10 +1,11 @@
 #include "wake_word_manager.h"
 #include "openwakeword_esp32.h"
-#include "korvo1.h"
+#include "board_config.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <stdbool.h>
 
 static const char *TAG = "wake_word_mgr";
 

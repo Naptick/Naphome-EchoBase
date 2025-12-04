@@ -1,4 +1,26 @@
-menu "Korvo1 LED Audio Test"
+menu "Voice Assistant Firmware Configuration"
+
+menu "Board Selection"
+    choice BOARD_TARGET
+        prompt "Target Board"
+        default BOARD_KORVO1
+        help
+            Select the target hardware board for this firmware build.
+
+        config BOARD_KORVO1
+            bool "Korvo1 Development Board"
+            help
+                ESP32-S3 with integrated ES8311 audio codec, PDM microphone,
+                speaker output, and 12x WS2812 RGB LED ring.
+
+        config BOARD_M5_ECHO_BASE
+            bool "M5 Atom S3R + Atom Echo Base"
+            help
+                M5Stack Atom S3R as main controller with Atom Echo Base audio module.
+                Features ES8311 codec, full-duplex I2S microphone, speaker output,
+                and single SK6812 RGB LED.
+    endchoice
+endmenu
 
 config LED_AUDIO_STRIP_GPIO
     int "WS2812 data GPIO"
@@ -77,4 +99,4 @@ config LOG_SWEEP_END_FREQ
                 WiFi network password
     endmenu
 
-endmenu
+endmenu  # Voice Assistant Firmware Configuration

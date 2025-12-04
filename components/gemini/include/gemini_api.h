@@ -53,26 +53,6 @@ esp_err_t gemini_llm(const char *prompt, char *response, size_t response_len);
 esp_err_t gemini_tts(const char *text, int16_t *audio_out, size_t audio_len, size_t *samples_written);
 
 /**
- * Callback function for streaming TTS audio playback
- * Called as decoded PCM chunks become available
- * @param samples: PCM audio samples (16-bit, mono)
- * @param sample_count: Number of samples in this chunk
- * @param user_data: User context pointer
- * @return ESP_OK to continue, or error to stop streaming
- */
-typedef esp_err_t (*gemini_tts_playback_callback_t)(const int16_t *samples, size_t sample_count, void *user_data);
-
-/**
- * Text-to-Speech with streaming playback
- * Decodes and streams audio to callback as it arrives from the API
- * @param text: Text to synthesize
- * @param callback: Function to call with decoded audio chunks
- * @param user_data: User context passed to callback
- * @return ESP_OK on success
- */
-esp_err_t gemini_tts_streaming(const char *text, gemini_tts_playback_callback_t callback, void *user_data);
-
-/**
  * Deinitialize Gemini API client
  */
 void gemini_api_deinit(void);

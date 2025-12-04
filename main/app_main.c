@@ -16,18 +16,10 @@
 // Access it via the generated symbol (ESP-IDF generates these symbols automatically)
 extern const uint8_t _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_start[] asm("_binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_start");
 extern const uint8_t _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end[] asm("_binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end");
-
-// Offline welcome message (for use when internet is unavailable)
-extern const uint8_t _binary_offline_welcome_wav_start[] asm("_binary_offline_welcome_wav_start");
-extern const uint8_t _binary_offline_welcome_wav_end[] asm("_binary_offline_welcome_wav_end");
 #include "mp3_decoder.h"
 #include "nvs_flash.h"
-#include "driver/i2s.h"
 
 static const char *TAG = "korvo1_led_audio";
-
-// Audio monitor for microphone input (used for LED reactivity)
-static TaskHandle_t s_audio_monitor_task = NULL;
 
 // LED strip handle
 static led_strip_handle_t s_strip = NULL;
@@ -35,15 +27,16 @@ static led_strip_handle_t s_strip = NULL;
 // Audio player configuration for korvo1
 // Based on ES8311 codec on korvo1 board
 // I2S pins per BSP: BCLK=GPIO40, LRCLK=GPIO41, DATA=GPIO39, MCLK=GPIO42
-// I2C pins per BSP: SCL=GPIO2, SDA=GPIO1
-static const audio_player_config_t s_audio_config = {
-    .i2s_port = I2S_NUM_0,  // Korvo1 uses I2S0 for speaker
-    .bclk_gpio = GPIO_NUM_40,  // BSP_I2S0_SCLK
-    .lrclk_gpio = GPIO_NUM_41,  // BSP_I2S0_LCLK
-    .data_gpio = GPIO_NUM_39,   // BSP_I2S0_DOUT
-    .mclk_gpio = GPIO_NUM_42,   // BSP_I2S0_MCLK
-    .i2c_scl_gpio = GPIO_NUM_2,  // BSP_I2C_SCL
-    .i2c_sda_gpio = GPIO_NUM_1,  // BSP_I2C_SDA
+// Audio config uses board-specific pins
+// These are selected at build-time based on CONFIG_BOARD_* settings from board headers
+static audio_player_config_t s_audio_config = {
+    .i2s_port = I2S_NUM_0,
+    .bclk_gpio = GPIO_I2S0_BCLK,      // Board-specific via board headers
+    .lrclk_gpio = GPIO_I2S0_LRCLK,    // Board-specific via board headers
+    .data_gpio = GPIO_I2S0_DOUT,      // Board-specific via board headers
+    .mclk_gpio = GPIO_I2S0_MCLK,      // Board-specific via board headers
+    .i2c_scl_gpio = GPIO_I2C_SCL,     // Board-specific via board headers
+    .i2c_sda_gpio = GPIO_I2C_SDA,     // Board-specific via board headers
     .default_sample_rate = CONFIG_AUDIO_SAMPLE_RATE,
 };
 
@@ -298,49 +291,6 @@ static void play_mp3_file(const uint8_t *mp3_data, size_t mp3_len)
     ESP_LOGI(TAG, "MP3 playback complete");
 }
 
-// Task for monitoring microphone input and making LEDs react to sound
-static void audio_monitor_task(void *pvParameters)
-{
-    ESP_LOGI(TAG, "🎤 Audio monitor task started - LEDs will react to microphone input");
-
-    // I2S1 configuration for microphone input on Korvo1
-    // Korvo1 has ES8311 codec: DOUT (speaker) on I2S0, DIN (microphone) also on I2S0
-    // For dual I/O on same I2S port: requires using I2S_CHANNEL_STEREO with separate bclk
-    // Simplified: use I2S_NUM_1 for microphone with GPIO51 (DIN), GPIO40 (BCLK), GPIO41 (LRCK)
-
-    const i2s_port_t i2s_port = I2S_NUM_1;
-    i2s_config_t i2s_cfg = {
-        .mode = I2S_MODE_MASTER | I2S_MODE_RX,  // Receive mode for microphone
-        .sample_rate = 16000,  // 16kHz is typical for voice/mic
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,  // Stereo
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL2,
-        .dma_buf_count = 4,
-        .dma_buf_len = 256,
-        .use_apll = false,
-        .tx_desc_auto_clear = true,
-        .fixed_mclk = 0,
-    };
-
-    // Try to install I2S driver
-    esp_err_t ret = i2s_driver_install(i2s_port, &i2s_cfg, 0, NULL);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to install I2S driver for microphone: %s", esp_err_to_name(ret));
-        // Don't fail completely - just disable audio monitoring
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // Set I2S pin configuration - using GPIO51 for DIN if available, or skip
-    // Actually: Korvo1 shares ES8311 on I2S0, might not have separate I2S1
-    // For now just use I2S0 in dual mode or skip mic input
-    // Let's just uninstall and skip
-    i2s_driver_uninstall(i2s_port);
-    ESP_LOGW(TAG, "Microphone I2S setup skipped - using visual feedback from existing audio");
-    vTaskDelete(NULL);
-}
-
 void app_main(void)
 {
     ESP_LOGI(TAG, "Korvo1 LED and Audio Test");
@@ -375,7 +325,7 @@ void app_main(void)
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &s_strip));
     ESP_ERROR_CHECK(led_strip_clear(s_strip));
     ESP_LOGI(TAG, "LED strip initialized");
-    
+
     // Initialize audio player
     esp_err_t audio_err = audio_player_init(&s_audio_config);
     if (audio_err != ESP_OK) {
@@ -497,84 +447,50 @@ void app_main(void)
     ESP_ERROR_CHECK(led_strip_clear(s_strip));
     vTaskDelay(pdMS_TO_TICKS(500));
     
-    // Play log sweep once as startup indicator
-    ESP_LOGI(TAG, "=== Playing log sweep test tone ===");
-
-    if (audio_err == ESP_OK) {
-        play_log_sweep_pcm();
-    } else {
-        ESP_LOGW(TAG, "Skipping audio (audio player not initialized)");
-        // Just animate LEDs
-        for (int i = 0; i < 100; i++) {
-            float progress = (float)i / 100.0f;
-            update_leds_for_audio(progress, true);
-            vTaskDelay(pdMS_TO_TICKS(50));
+    // Play log sweep three times, then move to voice assistant mode
+    for (int sweep_count = 0; sweep_count < 3; sweep_count++) {
+        ESP_LOGI(TAG, "=== Playing log sweep test tone (%d/3) ===", sweep_count + 1);
+        
+        if (audio_err == ESP_OK) {
+            play_log_sweep_pcm();
+        } else {
+            ESP_LOGW(TAG, "Skipping audio (audio player not initialized)");
+            // Just animate LEDs
+            for (int i = 0; i < 100; i++) {
+                float progress = (float)i / 100.0f;
+                update_leds_for_audio(progress, true);
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            update_leds_for_audio(0.0f, false);
         }
-        update_leds_for_audio(0.0f, false);
+        
+        if (sweep_count < 1) {
+            ESP_LOGI(TAG, "Waiting 2 seconds before next playback...");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
     }
     
     ESP_LOGI(TAG, "=== Sweep playback complete - entering voice assistant mode ===");
-
-    // Test offline welcome message (simple audio test without WiFi)
-    ESP_LOGI(TAG, "=== Testing offline welcome message ===");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    {
-        const uint8_t *offline_wav = _binary_offline_welcome_wav_start;
-        size_t offline_wav_size = _binary_offline_welcome_wav_end - _binary_offline_welcome_wav_start;
-
-        ESP_LOGI(TAG, "Playing offline welcome message (%zu bytes)", offline_wav_size);
-
-        // Verify WAV header
-        if (offline_wav_size < 44 ||
-            offline_wav[0] != 'R' || offline_wav[1] != 'I' ||
-            offline_wav[2] != 'F' || offline_wav[3] != 'F') {
-            ESP_LOGE(TAG, "Invalid offline WAV file - missing RIFF header!");
-        } else {
-            esp_err_t offline_err = audio_player_play_wav(offline_wav, offline_wav_size, update_leds_for_audio);
-            if (offline_err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to play offline welcome: %s", esp_err_to_name(offline_err));
-            } else {
-                ESP_LOGI(TAG, "✅ Offline welcome message playback complete");
-            }
-        }
-    }
-
-    ESP_LOGI(TAG, "=== Offline audio test complete ===");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    // Test TTS with welcome message (graceful fallback if offline/no WiFi)
+    
+    // Test TTS with welcome message
     #ifdef CONFIG_GEMINI_API_KEY
-    if (strlen(CONFIG_GEMINI_API_KEY) > 0) {
-        // Only try TTS if voice assistant is active (WiFi connected)
-        if (!voice_assistant_is_active()) {
-            ESP_LOGW(TAG, "⚠️  Voice assistant not active (WiFi or API key issue) - skipping TTS test");
+    if (strlen(CONFIG_GEMINI_API_KEY) > 0 && voice_assistant_is_active()) {
+        ESP_LOGI(TAG, "Testing TTS with welcome message...");
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Wait a bit after sweeps
+        
+        esp_err_t tts_err = voice_assistant_test_tts("Hello, I am Naptick");
+        if (tts_err == ESP_OK) {
+            ESP_LOGI(TAG, "✅ TTS test successful - welcome message should be playing");
         } else {
-            ESP_LOGI(TAG, "Testing TTS with welcome message...");
-            vTaskDelay(pdMS_TO_TICKS(2000)); // Wait a bit after sweeps
-
-            // Try TTS but don't block LED effects if it fails
-            // Reasons it might fail:
-            // - No WiFi connection (not configured or not available)
-            // - No internet (firewall, China, etc.)
-            // - API key invalid or quota exceeded
-            // - Network timeout
-            esp_err_t tts_err = voice_assistant_test_tts("Connected to Google Gemini");
-            if (tts_err == ESP_OK) {
-                ESP_LOGI(TAG, "✅ TTS test successful - welcome message should be playing");
-            } else {
-                // Graceful degradation: continue with LED effects even if TTS unavailable
-                ESP_LOGW(TAG, "⚠️  TTS unavailable: %s (continuing with LED effects)", esp_err_to_name(tts_err));
-            }
+            ESP_LOGE(TAG, "❌ TTS test failed: %s", esp_err_to_name(tts_err));
         }
     }
     #endif
-
-    // Main loop: voice assistant mode with continuous LED effects
+    
+    // Main loop: voice assistant mode
     while (true) {
         // Voice assistant is running in background
         // Wake word detection will trigger voice commands
-        // LED effects continue running regardless of TTS availability
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

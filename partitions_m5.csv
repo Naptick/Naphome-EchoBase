@@ -1,0 +1,6 @@
+# M5 Atom S3R partition table (8MB embedded flash)
+# M5 Atom S3R: ESP32-S3-PICO-1 with 8MB embedded flash + 8MB PSRAM
+# Name,     Type, SubType,  Offset,  Size,    Flags
+nvs,        data, nvs,      ,        0x6000,
+phy_init,   data, phy,      ,        0x1000,
+factory,    app,  factory,  ,        0x600000,

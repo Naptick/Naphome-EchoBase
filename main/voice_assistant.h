@@ -12,7 +12,7 @@ extern "C" {
  */
 typedef struct {
     char gemini_api_key[128];  // Google Gemini API key
-    char gemini_model[64];     // Gemini model name (default: "gemini-2.5-flash")
+    char gemini_model[64];     // Gemini model name (default: "gemini-1.5-flash")
 } voice_assistant_config_t;
 
 /**
