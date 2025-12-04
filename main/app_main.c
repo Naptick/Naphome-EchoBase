@@ -463,26 +463,39 @@ void app_main(void)
     }
     
     ESP_LOGI(TAG, "=== Sweep playback complete - entering voice assistant mode ===");
-    
-    // Test TTS with welcome message
+
+    // Test TTS with welcome message (graceful fallback if offline/no WiFi)
     #ifdef CONFIG_GEMINI_API_KEY
-    if (strlen(CONFIG_GEMINI_API_KEY) > 0 && voice_assistant_is_active()) {
-        ESP_LOGI(TAG, "Testing TTS with welcome message...");
-        vTaskDelay(pdMS_TO_TICKS(2000)); // Wait a bit after sweeps
-        
-        esp_err_t tts_err = voice_assistant_test_tts("Just say Hey, Nap to talk to me.");
-        if (tts_err == ESP_OK) {
-            ESP_LOGI(TAG, "✅ TTS test successful - welcome message should be playing");
+    if (strlen(CONFIG_GEMINI_API_KEY) > 0) {
+        // Only try TTS if voice assistant is active (WiFi connected)
+        if (!voice_assistant_is_active()) {
+            ESP_LOGW(TAG, "⚠️  Voice assistant not active (WiFi or API key issue) - skipping TTS test");
         } else {
-            ESP_LOGE(TAG, "❌ TTS test failed: %s", esp_err_to_name(tts_err));
+            ESP_LOGI(TAG, "Testing TTS with welcome message...");
+            vTaskDelay(pdMS_TO_TICKS(2000)); // Wait a bit after sweeps
+
+            // Try TTS but don't block LED effects if it fails
+            // Reasons it might fail:
+            // - No WiFi connection (not configured or not available)
+            // - No internet (firewall, China, etc.)
+            // - API key invalid or quota exceeded
+            // - Network timeout
+            esp_err_t tts_err = voice_assistant_test_tts("Just say Hey, Nap to talk to me.");
+            if (tts_err == ESP_OK) {
+                ESP_LOGI(TAG, "✅ TTS test successful - welcome message should be playing");
+            } else {
+                // Graceful degradation: continue with LED effects even if TTS unavailable
+                ESP_LOGW(TAG, "⚠️  TTS unavailable: %s (continuing with LED effects)", esp_err_to_name(tts_err));
+            }
         }
     }
     #endif
-    
-    // Main loop: voice assistant mode
+
+    // Main loop: voice assistant mode with continuous LED effects
     while (true) {
         // Voice assistant is running in background
         // Wake word detection will trigger voice commands
+        // LED effects continue running regardless of TTS availability
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

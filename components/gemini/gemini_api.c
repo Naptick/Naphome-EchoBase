@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <ctype.h>
 
 static const char *TAG = "gemini_api";
 
@@ -24,10 +25,21 @@ typedef struct {
     size_t cap;
 } http_buffer_t;
 
+// Streaming TTS response context - processes JSON as it arrives
+typedef struct {
+    streaming_base64_decoder_t *decoder;
+    gemini_tts_playback_callback_t callback;
+    void *user_data;
+    bool in_audio_content;
+    bool in_quoted_string;
+    bool escape_next;
+    uint8_t decode_buf[1024];
+} streaming_tts_response_t;
+
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     http_buffer_t *buf = (http_buffer_t *)evt->user_data;
-    
+
     switch (evt->event_id) {
         case HTTP_EVENT_ERROR:
             ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
@@ -61,6 +73,96 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         case HTTP_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
             break;
+        default:
+            break;
+    }
+    return ESP_OK;
+}
+
+// Streaming HTTP event handler for TTS - processes JSON and streams audio as it arrives
+static esp_err_t http_event_handler_streaming_tts(esp_http_client_event_t *evt)
+{
+    streaming_tts_response_t *ctx = (streaming_tts_response_t *)evt->user_data;
+
+    switch (evt->event_id) {
+        case HTTP_EVENT_ON_DATA:
+            if (evt->data_len == 0) {
+                break;
+            }
+
+            // Search for "audioContent":"BASE64DATA" pattern in the data
+            const char *data = (const char *)evt->data;
+            size_t data_len = evt->data_len;
+
+            // Debug: log if this is the first chunk and whether we found audioContent
+            static bool found_marker = false;
+            if (!found_marker && strstr(data, "audioContent") != NULL) {
+                ESP_LOGI(TAG, "🎵 Found audioContent marker in HTTP chunk (size=%zu)", data_len);
+                found_marker = true;
+            }
+
+            // Look for "audioContent":"BASE64DATA" pattern
+            for (size_t i = 0; i < data_len; i++) {
+                // If we haven't found audioContent yet, search for it
+                if (!ctx->in_audio_content) {
+                    // Look for the literal pattern: "audioContent":"
+                    if (i + 16 < data_len && strncmp(&data[i], "\"audioContent\":\"", 16) == 0) {
+                        ESP_LOGI(TAG, "🎵 Starting base64 decode at offset %zu", i + 16);
+                        ctx->in_audio_content = true;
+                        i += 15;  // Skip past the marker (the loop will i++ at the end)
+                        continue;
+                    }
+                }
+
+                // If we're in audioContent, process base64 characters
+                if (ctx->in_audio_content) {
+                    char c = data[i];
+
+                    // Check for closing quote (end of base64 string)
+                    if (c == '"') {
+                        // End of base64 string
+                        ctx->in_audio_content = false;
+
+                        // Finalize any remaining bytes
+                        size_t final_size = sizeof(ctx->decode_buf);
+                        streaming_base64_decode_finish(ctx->decoder, ctx->decode_buf, &final_size);
+                        if (final_size > 0) {
+                            size_t final_samples = final_size / sizeof(int16_t);
+                            ESP_LOGI(TAG, "🎵 Final audio chunk: %zu samples", final_samples);
+                            ctx->callback((int16_t *)ctx->decode_buf, final_samples, ctx->user_data);
+                        }
+                        ESP_LOGI(TAG, "🎵 Audio content finished");
+                        break;  // Done processing
+                    }
+                    else if (isalnum(c) || c == '+' || c == '/' || c == '=') {
+                        // Valid base64 character - decode immediately
+                        uint8_t b64_char = (uint8_t)c;
+                        size_t decode_buf_size = sizeof(ctx->decode_buf);
+                        esp_err_t decode_ret = streaming_base64_decode(
+                            ctx->decoder,
+                            &b64_char, 1,
+                            ctx->decode_buf,
+                            &decode_buf_size);
+
+                        if (decode_ret == ESP_OK && decode_buf_size > 0) {
+                            size_t sample_count = decode_buf_size / sizeof(int16_t);
+                            // Only log periodically to avoid spam
+                            static size_t total_audio_samples = 0;
+                            total_audio_samples += sample_count;
+                            if (total_audio_samples % 24000 == 0) {  // Log every 1 second of audio at 24kHz
+                                ESP_LOGD(TAG, "🎵 Streaming %zu samples, total so far: %zu", sample_count, total_audio_samples);
+                            }
+                            ctx->callback((int16_t *)ctx->decode_buf, sample_count, ctx->user_data);
+                        }
+                    }
+                }
+            }
+            break;
+
+        case HTTP_EVENT_ON_FINISH:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH (streaming TTS)");
+            break;
+
         default:
             break;
     }
@@ -630,121 +732,63 @@ esp_err_t gemini_tts_streaming(const char *text, gemini_tts_playback_callback_t 
              "https://texttospeech.googleapis.com/v1/text:synthesize?key=%s",
              s_config.api_key);
 
-    // Perform HTTP request - using standard buffering for JSON response
-    http_buffer_t http_response = {0};
-    esp_err_t ret = http_post_json_with_auth(url, payload, NULL, &http_response);
+    // Initialize streaming context for real-time audio decoding
+    streaming_tts_response_t stream_ctx = {0};
+    streaming_base64_decoder_t decoder = {0};
+    streaming_base64_decoder_init(&decoder);
+
+    stream_ctx.decoder = &decoder;
+    stream_ctx.callback = callback;
+    stream_ctx.user_data = user_data;
+    stream_ctx.in_audio_content = false;
+    stream_ctx.in_quoted_string = false;
+    stream_ctx.escape_next = false;
+
+    // Perform HTTP request with streaming event handler
+    esp_http_client_config_t config = {
+        .url = url,
+        .event_handler = http_event_handler_streaming_tts,
+        .user_data = &stream_ctx,
+        .timeout_ms = 30000,
+        .skip_cert_common_name_check = false,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .is_async = false,
+        .disable_auto_redirect = false,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        free(payload);
+        return ESP_FAIL;
+    }
+
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, payload, strlen(payload));
+
+    int64_t start_time = esp_timer_get_time();
+    esp_err_t err = esp_http_client_perform(client);
+    int64_t elapsed_us = esp_timer_get_time() - start_time;
+
+    int status_code = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "TTS HTTP response: %d (took %lld ms)", status_code, elapsed_us / 1000);
+
+    esp_http_client_cleanup(client);
     free(payload);
 
-    if (ret != ESP_OK) {
-        if (http_response.data) free(http_response.data);
-        return ret;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP POST failed: %s", esp_err_to_name(err));
+        return err;
     }
 
-    // Parse response to extract base64 audio
-    if (!http_response.data || http_response.len == 0) {
-        ESP_LOGE(TAG, "Empty response");
-        if (http_response.data) free(http_response.data);
+    if (status_code / 100 != 2) {
+        ESP_LOGE(TAG, "HTTP request failed with status %d", status_code);
         return ESP_FAIL;
     }
 
-    // Null-terminate for JSON parsing (buffer has room since allocated with extra space)
-    if (http_response.len < http_response.cap) {
-        http_response.data[http_response.len] = '\0';
-    } else {
-        // Buffer is exactly full - shouldn't happen with our allocation strategy
-        // but safe handling here
-        ESP_LOGE(TAG, "Response buffer is full, cannot null-terminate");
-        free(http_response.data);
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Verify response looks like valid JSON before parsing
-    ESP_LOGD(TAG, "Response buffer: len=%u, cap=%u, first_char='%c'",
-             http_response.len, http_response.cap, http_response.data[0]);
-
-    cJSON *response_json = cJSON_Parse((char *)http_response.data);
-
-    if (!response_json) {
-        ESP_LOGE(TAG, "Failed to parse JSON response (len=%u, cap=%u)", http_response.len, http_response.cap);
-        // Log first 200 chars of response for debugging
-        if (http_response.data && http_response.len > 0) {
-            char debug_buf[201];
-            size_t debug_len = (http_response.len > 200) ? 200 : http_response.len;
-            memcpy(debug_buf, http_response.data, debug_len);
-            debug_buf[debug_len] = '\0';
-            ESP_LOGI(TAG, "Response start: %.200s", debug_buf);
-        }
-        free(http_response.data);
-        return ESP_FAIL;
-    }
-
-    free(http_response.data);
-
-    cJSON *audioContent = cJSON_GetObjectItem(response_json, "audioContent");
-    if (audioContent && cJSON_IsString(audioContent)) {
-        const char *base64_audio = audioContent->valuestring;
-        size_t base64_len = strlen(base64_audio);
-
-        // Initialize streaming decoder
-        streaming_base64_decoder_t decoder;
-        streaming_base64_decoder_init(&decoder);
-
-        // Process base64 in chunks, streaming decoded audio
-        uint8_t decode_buf[1024];
-        size_t pos = 0;
-        size_t total_samples = 0;
-
-        while (pos < base64_len) {
-            // Take up to 256 base64 characters at a time (decodes to ~192 bytes = 96 PCM samples)
-            size_t chunk_size = (base64_len - pos > 256) ? 256 : (base64_len - pos);
-
-            size_t decode_buf_size = sizeof(decode_buf);
-            esp_err_t decode_ret = streaming_base64_decode(
-                &decoder,
-                (const uint8_t *)(base64_audio + pos),
-                chunk_size,
-                decode_buf,
-                &decode_buf_size);
-
-            if (decode_ret != ESP_OK) {
-                ESP_LOGE(TAG, "Base64 decode failed at position %zu", pos);
-                cJSON_Delete(response_json);
-                return ESP_FAIL;
-            }
-
-            // Stream decoded PCM to callback
-            if (decode_buf_size > 0) {
-                size_t sample_count = decode_buf_size / sizeof(int16_t);
-                esp_err_t callback_ret = callback((int16_t *)decode_buf, sample_count, user_data);
-                if (callback_ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Callback returned error, stopping streaming");
-                    cJSON_Delete(response_json);
-                    return callback_ret;
-                }
-                total_samples += sample_count;
-            }
-
-            pos += chunk_size;
-        }
-
-        // Finalize any remaining bytes
-        size_t final_size = sizeof(decode_buf);
-        esp_err_t final_ret = streaming_base64_decode_finish(&decoder, decode_buf, &final_size);
-        if (final_ret == ESP_OK && final_size > 0) {
-            size_t final_samples = final_size / sizeof(int16_t);
-            callback((int16_t *)decode_buf, final_samples, user_data);
-            total_samples += final_samples;
-        }
-
-        cJSON_Delete(response_json);
-        ESP_LOGI(TAG, "✅ [Gemini TTS Streaming] Success: %zu samples streamed (%.2f seconds at 24kHz)",
-                 total_samples, (float)total_samples / 24000.0f);
-        return ESP_OK;
-    }
-
-    cJSON_Delete(response_json);
-    ESP_LOGE(TAG, "❌ [Gemini TTS Streaming] Failed to extract audioContent from response");
-    return ESP_FAIL;
+    ESP_LOGI(TAG, "✅ [Gemini TTS Streaming] Complete");
+    return ESP_OK;
 }
 
 void gemini_api_deinit(void)

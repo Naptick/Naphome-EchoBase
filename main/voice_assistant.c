@@ -243,6 +243,7 @@ static esp_err_t tts_playback_callback(const int16_t *samples, size_t sample_cou
 }
 
 // Test TTS function - generate and play audio from text using streaming
+// Gracefully handles network errors (e.g., in China where Google is blocked)
 esp_err_t voice_assistant_test_tts(const char *text)
 {
     if (!s_initialized) {
@@ -261,9 +262,13 @@ esp_err_t voice_assistant_test_tts(const char *text)
 
     // Use streaming TTS - audio chunks are decoded and played as they arrive
     // No need to allocate 80KB buffer for entire audio
+    // Timeout is typically 30 seconds, but will fail faster if network is down
     esp_err_t ret = gemini_tts_streaming(text, tts_playback_callback, NULL);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Streaming TTS failed: %s", esp_err_to_name(ret));
+        // Graceful degradation: log warning but don't crash
+        // Common reasons: no internet, firewall blocks Google (China), API quota exceeded
+        ESP_LOGW(TAG, "⚠️  TTS streaming failed: %s", esp_err_to_name(ret));
+        ESP_LOGI(TAG, "Continuing without audio - LED effects will continue");
         return ret;
     }
 
