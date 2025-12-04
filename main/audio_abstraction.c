@@ -7,6 +7,7 @@
 #include "board_config.h"
 #include "esp_log.h"
 #include "driver/i2s.h"
+#include "hal/gpio_types.h"
 
 static const char *TAG = "audio_abstraction";
 

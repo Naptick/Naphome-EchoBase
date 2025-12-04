@@ -40,6 +40,8 @@
 
 #include "esp_err.h"
 #include "board_config.h"
+#include "hal/gpio_types.h"
+#include "driver/i2s.h"
 
 #ifdef __cplusplus
 extern "C" {
