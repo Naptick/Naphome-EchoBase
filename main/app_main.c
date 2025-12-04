@@ -515,6 +515,34 @@ void app_main(void)
     
     ESP_LOGI(TAG, "=== Sweep playback complete - entering voice assistant mode ===");
 
+    // Test offline welcome message (simple audio test without WiFi)
+    ESP_LOGI(TAG, "=== Testing offline welcome message ===");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    {
+        const uint8_t *offline_wav = _binary_offline_welcome_wav_start;
+        size_t offline_wav_size = _binary_offline_welcome_wav_end - _binary_offline_welcome_wav_start;
+
+        ESP_LOGI(TAG, "Playing offline welcome message (%zu bytes)", offline_wav_size);
+
+        // Verify WAV header
+        if (offline_wav_size < 44 ||
+            offline_wav[0] != 'R' || offline_wav[1] != 'I' ||
+            offline_wav[2] != 'F' || offline_wav[3] != 'F') {
+            ESP_LOGE(TAG, "Invalid offline WAV file - missing RIFF header!");
+        } else {
+            esp_err_t offline_err = audio_player_play_wav(offline_wav, offline_wav_size, update_leds_for_audio);
+            if (offline_err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to play offline welcome: %s", esp_err_to_name(offline_err));
+            } else {
+                ESP_LOGI(TAG, "✅ Offline welcome message playback complete");
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "=== Offline audio test complete ===");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
     // Test TTS with welcome message (graceful fallback if offline/no WiFi)
     #ifdef CONFIG_GEMINI_API_KEY
     if (strlen(CONFIG_GEMINI_API_KEY) > 0) {
@@ -531,7 +559,7 @@ void app_main(void)
             // - No internet (firewall, China, etc.)
             // - API key invalid or quota exceeded
             // - Network timeout
-            esp_err_t tts_err = voice_assistant_test_tts("Just say Hey, Nap to talk to me.");
+            esp_err_t tts_err = voice_assistant_test_tts("Connected to Google Gemini");
             if (tts_err == ESP_OK) {
                 ESP_LOGI(TAG, "✅ TTS test successful - welcome message should be playing");
             } else {
