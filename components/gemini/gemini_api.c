@@ -109,13 +109,16 @@ static esp_err_t http_event_handler_streaming_tts(esp_http_client_event_t *evt)
                 // If we haven't found audioContent yet, search for it
                 if (!ctx->in_audio_content) {
                     // Look for the literal pattern: "audioContent":"
-                    if (i + 16 < data_len && strncmp(&data[i], "\"audioContent\":\"", 16) == 0) {
-                        ESP_LOGI(TAG, "🎵 Found audioContent marker at offset %zu in chunk (chunk size %zu)", i, data_len);
+                    if (i + 16 <= data_len && strncmp(&data[i], "\"audioContent\":\"", 16) == 0) {
+                        ESP_LOGI(TAG, "🎵 Found audioContent marker at offset %zu", i);
                         ctx->in_audio_content = true;
                         base64_start_offset = i + 16;
                         total_base64_chars = 0;
-                        i += 15;  // Skip past the marker (the loop will i++ at the end)
-                        continue;
+                        i += 16;  // Jump past marker to first base64 char
+                        // Don't continue here - process the character at i+16
+                        // Fall through to next iteration which will process first base64 char
+                    } else {
+                        continue;  // No marker found, keep searching
                     }
                 }
 
