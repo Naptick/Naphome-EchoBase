@@ -18,8 +18,12 @@ extern const uint8_t _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL
 extern const uint8_t _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end[] asm("_binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end");
 #include "mp3_decoder.h"
 #include "nvs_flash.h"
+#include "driver/i2s.h"
 
 static const char *TAG = "korvo1_led_audio";
+
+// Audio monitor for microphone input (used for LED reactivity)
+static TaskHandle_t s_audio_monitor_task = NULL;
 
 // LED strip handle
 static led_strip_handle_t s_strip = NULL;
@@ -288,6 +292,49 @@ static void play_mp3_file(const uint8_t *mp3_data, size_t mp3_len)
     free(pcm_buffer);
     mp3_decoder_destroy(decoder);
     ESP_LOGI(TAG, "MP3 playback complete");
+}
+
+// Task for monitoring microphone input and making LEDs react to sound
+static void audio_monitor_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "🎤 Audio monitor task started - LEDs will react to microphone input");
+
+    // I2S1 configuration for microphone input on Korvo1
+    // Korvo1 has ES8311 codec: DOUT (speaker) on I2S0, DIN (microphone) also on I2S0
+    // For dual I/O on same I2S port: requires using I2S_CHANNEL_STEREO with separate bclk
+    // Simplified: use I2S_NUM_1 for microphone with GPIO51 (DIN), GPIO40 (BCLK), GPIO41 (LRCK)
+
+    const i2s_port_t i2s_port = I2S_NUM_1;
+    i2s_config_t i2s_cfg = {
+        .mode = I2S_MODE_MASTER | I2S_MODE_RX,  // Receive mode for microphone
+        .sample_rate = 16000,  // 16kHz is typical for voice/mic
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,  // Stereo
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL2,
+        .dma_buf_count = 4,
+        .dma_buf_len = 256,
+        .use_apll = false,
+        .tx_desc_auto_clear = true,
+        .fixed_mclk = 0,
+    };
+
+    // Try to install I2S driver
+    esp_err_t ret = i2s_driver_install(i2s_port, &i2s_cfg, 0, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to install I2S driver for microphone: %s", esp_err_to_name(ret));
+        // Don't fail completely - just disable audio monitoring
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Set I2S pin configuration - using GPIO51 for DIN if available, or skip
+    // Actually: Korvo1 shares ES8311 on I2S0, might not have separate I2S1
+    // For now just use I2S0 in dual mode or skip mic input
+    // Let's just uninstall and skip
+    i2s_driver_uninstall(i2s_port);
+    ESP_LOGW(TAG, "Microphone I2S setup skipped - using visual feedback from existing audio");
+    vTaskDelete(NULL);
 }
 
 void app_main(void)

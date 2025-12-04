@@ -102,13 +102,18 @@ static esp_err_t http_event_handler_streaming_tts(esp_http_client_event_t *evt)
             }
 
             // Look for "audioContent":"BASE64DATA" pattern
+            static size_t total_base64_chars = 0;
+            static size_t base64_start_offset = 0;
+
             for (size_t i = 0; i < data_len; i++) {
                 // If we haven't found audioContent yet, search for it
                 if (!ctx->in_audio_content) {
                     // Look for the literal pattern: "audioContent":"
                     if (i + 16 < data_len && strncmp(&data[i], "\"audioContent\":\"", 16) == 0) {
-                        ESP_LOGI(TAG, "🎵 Starting base64 decode at offset %zu", i + 16);
+                        ESP_LOGI(TAG, "🎵 Found audioContent marker at offset %zu in chunk (chunk size %zu)", i, data_len);
                         ctx->in_audio_content = true;
+                        base64_start_offset = i + 16;
+                        total_base64_chars = 0;
                         i += 15;  // Skip past the marker (the loop will i++ at the end)
                         continue;
                     }
@@ -122,19 +127,24 @@ static esp_err_t http_event_handler_streaming_tts(esp_http_client_event_t *evt)
                     if (c == '"') {
                         // End of base64 string
                         ctx->in_audio_content = false;
+                        ESP_LOGI(TAG, "🎵 End of base64 marker found. Total base64 chars processed: %zu", total_base64_chars);
 
                         // Finalize any remaining bytes
                         size_t final_size = sizeof(ctx->decode_buf);
-                        streaming_base64_decode_finish(ctx->decoder, ctx->decode_buf, &final_size);
+                        esp_err_t final_ret = streaming_base64_decode_finish(ctx->decoder, ctx->decode_buf, &final_size);
+                        ESP_LOGI(TAG, "🎵 Base64 finalize: ret=%d, final_size=%zu", final_ret, final_size);
+
                         if (final_size > 0) {
                             size_t final_samples = final_size / sizeof(int16_t);
-                            ESP_LOGI(TAG, "🎵 Final audio chunk: %zu samples", final_samples);
-                            ctx->callback((int16_t *)ctx->decode_buf, final_samples, ctx->user_data);
+                            ESP_LOGI(TAG, "🎵 Final audio chunk: %zu samples (callback=%p, user_data=%p)", final_samples, ctx->callback, ctx->user_data);
+                            esp_err_t cb_ret = ctx->callback((int16_t *)ctx->decode_buf, final_samples, ctx->user_data);
+                            ESP_LOGI(TAG, "🎵 Final callback returned: %s", esp_err_to_name(cb_ret));
                         }
                         ESP_LOGI(TAG, "🎵 Audio content finished");
                         break;  // Done processing
                     }
                     else if (isalnum(c) || c == '+' || c == '/' || c == '=') {
+                        total_base64_chars++;
                         // Valid base64 character - decode immediately
                         uint8_t b64_char = (uint8_t)c;
                         size_t decode_buf_size = sizeof(ctx->decode_buf);
@@ -144,15 +154,35 @@ static esp_err_t http_event_handler_streaming_tts(esp_http_client_event_t *evt)
                             ctx->decode_buf,
                             &decode_buf_size);
 
-                        if (decode_ret == ESP_OK && decode_buf_size > 0) {
+                        if (decode_ret != ESP_OK) {
+                            ESP_LOGW(TAG, "🎵 Base64 decode error: %s", esp_err_to_name(decode_ret));
+                        }
+
+                        if (decode_buf_size > 0) {
                             size_t sample_count = decode_buf_size / sizeof(int16_t);
-                            // Only log periodically to avoid spam
+                            // Log first chunk and every 1 second thereafter
                             static size_t total_audio_samples = 0;
+                            static bool first_chunk_logged = false;
                             total_audio_samples += sample_count;
-                            if (total_audio_samples % 24000 == 0) {  // Log every 1 second of audio at 24kHz
+
+                            if (!first_chunk_logged) {
+                                ESP_LOGI(TAG, "🎵 First audio chunk: %zu samples (first 4 PCM: %d,%d,%d,%d)",
+                                    sample_count,
+                                    ((int16_t*)ctx->decode_buf)[0],
+                                    ((int16_t*)ctx->decode_buf)[1],
+                                    ((int16_t*)ctx->decode_buf)[2],
+                                    ((int16_t*)ctx->decode_buf)[3]);
+                                first_chunk_logged = true;
+                            }
+
+                            if (total_audio_samples % 24000 < sample_count) {  // Log every ~1 second of audio at 24kHz
                                 ESP_LOGD(TAG, "🎵 Streaming %zu samples, total so far: %zu", sample_count, total_audio_samples);
                             }
-                            ctx->callback((int16_t *)ctx->decode_buf, sample_count, ctx->user_data);
+
+                            esp_err_t cb_ret = ctx->callback((int16_t *)ctx->decode_buf, sample_count, ctx->user_data);
+                            if (cb_ret != ESP_OK) {
+                                ESP_LOGW(TAG, "🎵 Callback returned error: %s", esp_err_to_name(cb_ret));
+                            }
                         }
                     }
                 }

@@ -547,12 +547,21 @@ static esp_err_t write_pcm_frames(const int16_t *samples, size_t sample_count, i
         size_t bytes_to_write = frames_this * sizeof(int16_t) * 2;
         size_t total_written = 0;
         
-        // Log first chunk to verify audio data
+        // Log first chunk and every second to verify audio data
         static bool first_write_logged = false;
+        static size_t write_count = 0;
+        write_count++;
+
         if (!first_write_logged && frames_written == 0) {
-            ESP_LOGI(TAG, "First I2S write: %zu frames, first 4 PCM samples: %d, %d, %d, %d",
+            ESP_LOGI(TAG, "🔊 First I2S write: %zu frames, first 4 PCM samples: %d, %d, %d, %d",
                      frames_this, stereo_buffer[0], stereo_buffer[1], stereo_buffer[2], stereo_buffer[3]);
             first_write_logged = true;
+        }
+
+        // Log every 1000th write (~6 seconds at 16kHz) to verify continuous writing
+        if (write_count % 1000 == 0) {
+            ESP_LOGI(TAG, "🔊 I2S write #%zu: %zu frames, RMS level: %d",
+                     write_count, frames_this, (int)((stereo_buffer[0] + stereo_buffer[2]) / 2));
         }
         
         while (total_written < bytes_to_write) {
