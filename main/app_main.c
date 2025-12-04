@@ -16,6 +16,10 @@
 // Access it via the generated symbol (ESP-IDF generates these symbols automatically)
 extern const uint8_t _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_start[] asm("_binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_start");
 extern const uint8_t _binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end[] asm("_binary_256kMeasSweep_0_to_20000__12_dBFS_48k_Float_LR_refL_wav_end");
+
+// Offline welcome message (for use when internet is unavailable)
+extern const uint8_t _binary_offline_welcome_wav_start[] asm("_binary_offline_welcome_wav_start");
+extern const uint8_t _binary_offline_welcome_wav_end[] asm("_binary_offline_welcome_wav_end");
 #include "mp3_decoder.h"
 #include "nvs_flash.h"
 #include "driver/i2s.h"
